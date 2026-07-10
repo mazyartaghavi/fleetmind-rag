@@ -1,0 +1,17 @@
+[project]
+name = "fleetmind-rag"
+version = "0.1.0"
+description = "Agentic retrieval-augmented copilot for intelligent fleet operations with feedback-driven policy optimization."
+readme = "README.md"
+authors = [
+    { name = "Mazyar Taghavi", email = "mazyartaghavi@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+fleetmind-rag = "fleetmind_rag:main"
+
+[build-system]
+requires = ["uv_build>=0.11.28,<0.12.0"]
+build-backend = "uv_build"

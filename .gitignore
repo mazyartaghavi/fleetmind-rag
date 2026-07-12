@@ -13,3 +13,11 @@ wheels/
 .env
 .env.*
 !.env.example
+# Test, coverage, type-checking, and linting artifacts
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

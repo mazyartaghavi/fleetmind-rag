@@ -7,7 +7,9 @@ authors = [
     { name = "Mazyar Taghavi", email = "mazyartaghavi@gmail.com" }
 ]
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "pydantic-settings>=2.14.2",
+]
 
 [project.scripts]
 fleetmind-rag = "fleetmind_rag:main"

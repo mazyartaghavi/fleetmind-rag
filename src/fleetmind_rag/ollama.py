@@ -185,3 +185,150 @@ class OllamaModelClient:
             models=tuple(models),
             message=f"Installed Ollama model count: {len(models)}.",
         )
+
+
+@dataclass(frozen=True, slots=True)
+class OllamaChatResult:
+    """Result of requesting a chat response from Ollama."""
+
+    succeeded: bool
+    content: str | None
+    model: str | None
+    message: str
+
+
+class OllamaChatClient:
+    """Generate non-streaming chat responses through the Ollama API."""
+
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        *,
+        timeout_seconds: float = 120.0,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
+        if not model.strip():
+            raise ValueError("The Ollama chat model must not be empty.")
+
+        self._base_url = base_url.rstrip("/")
+        self._model = model.strip()
+        self._timeout = httpx.Timeout(timeout_seconds)
+        self._transport = transport
+
+    def chat(
+        self,
+        prompt: str,
+        *,
+        system_prompt: str | None = None,
+    ) -> OllamaChatResult:
+        """Generate one complete assistant response for a user prompt."""
+
+        clean_prompt = prompt.strip()
+
+        if not clean_prompt:
+            raise ValueError("The Ollama chat prompt must not be empty.")
+
+        messages: list[dict[str, str]] = []
+
+        if system_prompt is not None and system_prompt.strip():
+            messages.append(
+                {
+                    "role": "system",
+                    "content": system_prompt.strip(),
+                }
+            )
+
+        messages.append(
+            {
+                "role": "user",
+                "content": clean_prompt,
+            }
+        )
+
+        try:
+            with httpx.Client(
+                base_url=self._base_url,
+                timeout=self._timeout,
+                transport=self._transport,
+            ) as client:
+                response = client.post(
+                    "/api/chat",
+                    json={
+                        "model": self._model,
+                        "messages": messages,
+                        "stream": False,
+                    },
+                )
+                response.raise_for_status()
+        except httpx.TimeoutException:
+            return OllamaChatResult(
+                succeeded=False,
+                content=None,
+                model=None,
+                message="The Ollama chat request timed out.",
+            )
+        except httpx.RequestError:
+            return OllamaChatResult(
+                succeeded=False,
+                content=None,
+                model=None,
+                message="The Ollama API is unreachable.",
+            )
+        except httpx.HTTPStatusError as error:
+            return OllamaChatResult(
+                succeeded=False,
+                content=None,
+                model=None,
+                message=(f"The Ollama API returned HTTP {error.response.status_code}."),
+            )
+
+        try:
+            payload = response.json()
+        except ValueError:
+            return OllamaChatResult(
+                succeeded=False,
+                content=None,
+                model=None,
+                message="The Ollama API returned invalid JSON.",
+            )
+
+        if not isinstance(payload, dict):
+            return OllamaChatResult(
+                succeeded=False,
+                content=None,
+                model=None,
+                message="The Ollama API returned an invalid chat response.",
+            )
+
+        response_message = payload.get("message")
+
+        if not isinstance(response_message, dict):
+            return OllamaChatResult(
+                succeeded=False,
+                content=None,
+                model=None,
+                message="The Ollama API returned an invalid chat response.",
+            )
+
+        content = response_message.get("content")
+
+        if not isinstance(content, str) or not content.strip():
+            return OllamaChatResult(
+                succeeded=False,
+                content=None,
+                model=None,
+                message="The Ollama API returned an empty chat response.",
+            )
+
+        response_model = payload.get("model")
+
+        if not isinstance(response_model, str) or not response_model.strip():
+            response_model = self._model
+
+        return OllamaChatResult(
+            succeeded=True,
+            content=content.strip(),
+            model=response_model.strip(),
+            message="The Ollama chat request succeeded.",
+        )

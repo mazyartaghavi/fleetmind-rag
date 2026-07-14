@@ -78,10 +78,11 @@ def test_main_prints_configuration_health_and_models(
         _FakeOllamaModelClient,
     )
 
-    main()
+    exit_code = main([])
 
     captured = capsys.readouterr()
 
+    assert exit_code == 0
     assert "FleetMind-RAG configuration loaded successfully." in captured.out
     assert "Environment: test" in captured.out
     assert "Log level: DEBUG" in captured.out
@@ -162,10 +163,11 @@ def test_main_skips_model_discovery_when_ollama_is_unavailable(
         _UnexpectedModelClient,
     )
 
-    main()
+    exit_code = main([])
 
     captured = capsys.readouterr()
 
+    assert exit_code == 0
     assert "Ollama status: unavailable. The Ollama API is unreachable." in captured.out
     assert (
         "Ollama models: unavailable because the Ollama API "

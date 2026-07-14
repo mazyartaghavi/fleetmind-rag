@@ -1,5 +1,11 @@
+import argparse
+import sys
+from collections.abc import Sequence
+from typing import cast
+
 from fleetmind_rag.config import FleetMindSettings
 from fleetmind_rag.ollama import (
+    OllamaChatClient,
     OllamaHealth,
     OllamaHealthClient,
     OllamaModelClient,
@@ -54,10 +60,37 @@ def build_ollama_models_message(
     return f"Ollama models: {model_names}."
 
 
-def main() -> None:
-    """Start FleetMind-RAG using validated application settings."""
+def build_cli_parser() -> argparse.ArgumentParser:
+    """Build the FleetMind-RAG command-line argument parser."""
 
-    settings = FleetMindSettings()
+    parser = argparse.ArgumentParser(
+        prog="fleetmind-rag",
+        description="FleetMind-RAG local fleet operations copilot.",
+    )
+
+    subparsers = parser.add_subparsers(dest="command")
+
+    chat_parser = subparsers.add_parser(
+        "chat",
+        help="Send one prompt to the configured Ollama chat model.",
+    )
+    chat_parser.add_argument(
+        "prompt",
+        help="The user prompt to send to the configured model.",
+    )
+    chat_parser.add_argument(
+        "--system",
+        dest="system_prompt",
+        default=None,
+        help="Optional system instruction for the model.",
+    )
+
+    return parser
+
+
+def run_status(settings: FleetMindSettings) -> int:
+    """Print the active configuration and Ollama service status."""
+
     base_url = str(settings.llm_base_url)
 
     print(build_startup_message(settings))
@@ -68,8 +101,58 @@ def main() -> None:
 
     if not health.available:
         print("Ollama models: unavailable because the Ollama API is not reachable.")
-        return
+        return 0
 
     models_result = OllamaModelClient(base_url).list_models()
 
     print(build_ollama_models_message(models_result))
+
+    return 0
+
+
+def run_chat(
+    settings: FleetMindSettings,
+    prompt: str,
+    *,
+    system_prompt: str | None = None,
+) -> int:
+    """Send one prompt to the configured Ollama model."""
+
+    result = OllamaChatClient(
+        str(settings.llm_base_url),
+        settings.llm_model,
+    ).chat(
+        prompt,
+        system_prompt=system_prompt,
+    )
+
+    if result.succeeded and result.content is not None:
+        print(result.content)
+        return 0
+
+    print(
+        f"FleetMind chat failed: {result.message}",
+        file=sys.stderr,
+    )
+    return 1
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Run the FleetMind-RAG command-line application."""
+
+    args = build_cli_parser().parse_args(argv)
+    settings = FleetMindSettings()
+
+    command = cast(str | None, args.command)
+
+    if command == "chat":
+        prompt = cast(str, args.prompt)
+        system_prompt = cast(str | None, args.system_prompt)
+
+        return run_chat(
+            settings,
+            prompt,
+            system_prompt=system_prompt,
+        )
+
+    return run_status(settings)

@@ -2,8 +2,36 @@ from pathlib import Path
 
 import pytest
 
-from fleetmind_rag.app import main
+from fleetmind_rag.app import (
+    DEFAULT_SYSTEM_PROMPT,
+    build_system_prompt,
+    main,
+)
 from fleetmind_rag.ollama import OllamaChatResult
+
+
+@pytest.mark.parametrize(
+    "user_system_prompt",
+    [
+        None,
+        "",
+        "   ",
+    ],
+)
+def test_build_system_prompt_uses_default_for_missing_instruction(
+    user_system_prompt: str | None,
+) -> None:
+    result = build_system_prompt(user_system_prompt)
+
+    assert result == DEFAULT_SYSTEM_PROMPT
+
+
+def test_build_system_prompt_appends_user_instruction() -> None:
+    result = build_system_prompt("  Answer briefly.  ")
+
+    assert result == (
+        f"{DEFAULT_SYSTEM_PROMPT}\n\nAdditional user instruction: Answer briefly."
+    )
 
 
 def test_chat_command_prints_model_response(
@@ -27,7 +55,10 @@ def test_chat_command_prints_model_response(
             system_prompt: str | None = None,
         ) -> OllamaChatResult:
             assert prompt == "Summarize fleet status."
-            assert system_prompt == "Answer briefly."
+            assert system_prompt == (
+                f"{DEFAULT_SYSTEM_PROMPT}\n\n"
+                "Additional user instruction: Answer briefly."
+            )
 
             return OllamaChatResult(
                 succeeded=True,
@@ -79,7 +110,7 @@ def test_chat_command_reports_failure(
             system_prompt: str | None = None,
         ) -> OllamaChatResult:
             assert prompt == "Hello"
-            assert system_prompt is None
+            assert system_prompt == DEFAULT_SYSTEM_PROMPT
 
             return OllamaChatResult(
                 succeeded=False,

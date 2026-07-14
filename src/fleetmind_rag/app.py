@@ -1,4 +1,5 @@
 from fleetmind_rag.config import FleetMindSettings
+from fleetmind_rag.ollama import OllamaHealth, OllamaHealthClient
 
 
 def build_startup_message(settings: FleetMindSettings) -> str:
@@ -23,8 +24,22 @@ def build_startup_message(settings: FleetMindSettings) -> str:
     )
 
 
+def build_ollama_health_message(health: OllamaHealth) -> str:
+    """Build a concise summary of the Ollama API health."""
+
+    if health.available and health.version is not None:
+        return f"Ollama status: available (version {health.version})."
+
+    return f"Ollama status: unavailable. {health.message}"
+
+
 def main() -> None:
     """Start FleetMind-RAG using validated application settings."""
 
     settings = FleetMindSettings()
+
     print(build_startup_message(settings))
+
+    health = OllamaHealthClient(str(settings.llm_base_url)).check()
+
+    print(build_ollama_health_message(health))

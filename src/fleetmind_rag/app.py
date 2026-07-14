@@ -1,5 +1,10 @@
 from fleetmind_rag.config import FleetMindSettings
-from fleetmind_rag.ollama import OllamaHealth, OllamaHealthClient
+from fleetmind_rag.ollama import (
+    OllamaHealth,
+    OllamaHealthClient,
+    OllamaModelClient,
+    OllamaModelListResult,
+)
 
 
 def build_startup_message(settings: FleetMindSettings) -> str:
@@ -33,13 +38,38 @@ def build_ollama_health_message(health: OllamaHealth) -> str:
     return f"Ollama status: unavailable. {health.message}"
 
 
+def build_ollama_models_message(
+    result: OllamaModelListResult,
+) -> str:
+    """Build a concise summary of the models available through Ollama."""
+
+    if not result.succeeded:
+        return f"Ollama models: unavailable. {result.message}"
+
+    if not result.models:
+        return "Ollama models: none installed."
+
+    model_names = ", ".join(model.name for model in result.models)
+
+    return f"Ollama models: {model_names}."
+
+
 def main() -> None:
     """Start FleetMind-RAG using validated application settings."""
 
     settings = FleetMindSettings()
+    base_url = str(settings.llm_base_url)
 
     print(build_startup_message(settings))
 
-    health = OllamaHealthClient(str(settings.llm_base_url)).check()
+    health = OllamaHealthClient(base_url).check()
 
     print(build_ollama_health_message(health))
+
+    if not health.available:
+        print("Ollama models: unavailable because the Ollama API is not reachable.")
+        return
+
+    models_result = OllamaModelClient(base_url).list_models()
+
+    print(build_ollama_models_message(models_result))

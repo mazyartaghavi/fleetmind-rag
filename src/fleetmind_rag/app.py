@@ -12,6 +12,26 @@ from fleetmind_rag.ollama import (
     OllamaModelListResult,
 )
 
+DEFAULT_SYSTEM_PROMPT = (
+    "You are FleetMind-RAG, a local copilot being developed for intelligent "
+    "fleet operations. The project uses local language models and is intended "
+    "to support retrieval-augmented answers about fleet documents and "
+    "operational data. Do not invent customers, deployments, organizations, "
+    "affiliations, data sources, or implemented capabilities. Base answers "
+    "only on information provided in the conversation or retrieved context. "
+    "When required information is missing, say that it is not available."
+)
+
+DEFAULT_SYSTEM_PROMPT = (
+    "You are FleetMind-RAG, a local copilot being developed for intelligent "
+    "fleet operations. The project uses local language models and is intended "
+    "to support retrieval-augmented answers about fleet documents and "
+    "operational data. Do not invent customers, deployments, organizations, "
+    "affiliations, data sources, or implemented capabilities. Base answers "
+    "only on information provided in the conversation or retrieved context. "
+    "When required information is missing, say that it is not available."
+)
+
 
 def build_startup_message(settings: FleetMindSettings) -> str:
     """Build a safe summary of the active application configuration."""
@@ -110,6 +130,20 @@ def run_status(settings: FleetMindSettings) -> int:
     return 0
 
 
+def build_system_prompt(
+    user_system_prompt: str | None,
+) -> str:
+    """Combine the project guardrail with an optional user instruction."""
+
+    if user_system_prompt is None or not user_system_prompt.strip():
+        return DEFAULT_SYSTEM_PROMPT
+
+    return (
+        f"{DEFAULT_SYSTEM_PROMPT}\n\n"
+        f"Additional user instruction: {user_system_prompt.strip()}"
+    )
+
+
 def run_chat(
     settings: FleetMindSettings,
     prompt: str,
@@ -118,12 +152,14 @@ def run_chat(
 ) -> int:
     """Send one prompt to the configured Ollama model."""
 
+    effective_system_prompt = build_system_prompt(system_prompt)
+
     result = OllamaChatClient(
         str(settings.llm_base_url),
         settings.llm_model,
     ).chat(
         prompt,
-        system_prompt=system_prompt,
+        system_prompt=effective_system_prompt,
     )
 
     if result.succeeded and result.content is not None:

@@ -21,3 +21,6 @@ coverage.xml
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+
+# Local Qdrant vector database
+data/qdrant_local/

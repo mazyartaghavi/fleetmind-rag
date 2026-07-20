@@ -332,3 +332,171 @@ class OllamaChatClient:
             model=response_model.strip(),
             message="The Ollama chat request succeeded.",
         )
+
+
+@dataclass(frozen=True, slots=True)
+class OllamaEmbeddingResult:
+    """Result of requesting embeddings from Ollama."""
+
+    succeeded: bool
+    embeddings: tuple[tuple[float, ...], ...]
+    model: str | None
+    message: str
+
+
+class OllamaEmbeddingClient:
+    """Generate text embeddings through the Ollama API."""
+
+    def __init__(
+        self,
+        base_url: str,
+        model: str,
+        *,
+        timeout_seconds: float = 120.0,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
+        if not model.strip():
+            raise ValueError("The Ollama embedding model must not be empty.")
+
+        self._base_url = base_url.rstrip("/")
+        self._model = model.strip()
+        self._timeout = httpx.Timeout(timeout_seconds)
+        self._transport = transport
+
+    def embed(
+        self,
+        input_value: str | list[str] | tuple[str, ...],
+    ) -> OllamaEmbeddingResult:
+        """Generate embeddings for one text or a batch of texts."""
+
+        normalized_inputs: tuple[str, ...]
+        request_input: str | list[str]
+
+        if isinstance(input_value, str):
+            cleaned_input = input_value.strip()
+
+            if not cleaned_input:
+                raise ValueError("The Ollama embedding input must not be empty.")
+
+            normalized_inputs = (cleaned_input,)
+            request_input = cleaned_input
+        else:
+            normalized_inputs = tuple(text.strip() for text in input_value)
+
+            if not normalized_inputs:
+                raise ValueError("The Ollama embedding input must not be empty.")
+
+            if any(not text for text in normalized_inputs):
+                raise ValueError("Ollama embedding inputs must not contain empty text.")
+
+            request_input = list(normalized_inputs)
+
+        try:
+            with httpx.Client(
+                base_url=self._base_url,
+                timeout=self._timeout,
+                transport=self._transport,
+            ) as client:
+                response = client.post(
+                    "/api/embed",
+                    json={
+                        "model": self._model,
+                        "input": request_input,
+                    },
+                )
+                response.raise_for_status()
+        except httpx.TimeoutException:
+            return OllamaEmbeddingResult(
+                succeeded=False,
+                embeddings=(),
+                model=None,
+                message="The Ollama embedding request timed out.",
+            )
+        except httpx.RequestError:
+            return OllamaEmbeddingResult(
+                succeeded=False,
+                embeddings=(),
+                model=None,
+                message="The Ollama API is unreachable.",
+            )
+        except httpx.HTTPStatusError as error:
+            return OllamaEmbeddingResult(
+                succeeded=False,
+                embeddings=(),
+                model=None,
+                message=(f"The Ollama API returned HTTP {error.response.status_code}."),
+            )
+
+        try:
+            payload = response.json()
+        except ValueError:
+            return OllamaEmbeddingResult(
+                succeeded=False,
+                embeddings=(),
+                model=None,
+                message="The Ollama API returned invalid JSON.",
+            )
+
+        if not isinstance(payload, dict):
+            return self._invalid_response_result()
+
+        raw_embeddings = payload.get("embeddings")
+
+        if not isinstance(raw_embeddings, list) or not raw_embeddings:
+            return self._invalid_response_result()
+
+        parsed_embeddings: list[tuple[float, ...]] = []
+        dimension: int | None = None
+
+        for raw_vector in raw_embeddings:
+            if not isinstance(raw_vector, list) or not raw_vector:
+                return self._invalid_response_result()
+
+            vector_values: list[float] = []
+
+            for value in raw_vector:
+                if isinstance(value, bool) or not isinstance(
+                    value,
+                    (int, float),
+                ):
+                    return self._invalid_response_result()
+
+                vector_values.append(float(value))
+
+            vector = tuple(vector_values)
+
+            if dimension is None:
+                dimension = len(vector)
+            elif len(vector) != dimension:
+                return self._invalid_response_result()
+
+            parsed_embeddings.append(vector)
+
+        if len(parsed_embeddings) != len(normalized_inputs):
+            return self._invalid_response_result()
+
+        response_model = payload.get("model")
+
+        if not isinstance(response_model, str) or not response_model.strip():
+            response_model = self._model
+
+        return OllamaEmbeddingResult(
+            succeeded=True,
+            embeddings=tuple(parsed_embeddings),
+            model=response_model.strip(),
+            message=(
+                f"Generated {len(parsed_embeddings)} Ollama embedding(s) "
+                f"with dimension {dimension}."
+            ),
+        )
+
+    @staticmethod
+    def _invalid_response_result() -> OllamaEmbeddingResult:
+        """Build a standard result for malformed embedding responses."""
+
+        return OllamaEmbeddingResult(
+            succeeded=False,
+            embeddings=(),
+            model=None,
+            message=("The Ollama API returned an invalid embedding response."),
+        )

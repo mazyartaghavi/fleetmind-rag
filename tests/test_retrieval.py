@@ -1,0 +1,292 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import pytest
+
+from fleetmind_rag.documents import ingest_text_document
+from fleetmind_rag.ollama import OllamaEmbeddingResult
+from fleetmind_rag.retrieval import DocumentRetrievalService
+from fleetmind_rag.vector_store import QdrantChunkStore
+
+
+@dataclass
+class FakeEmbeddingClient:
+    fail: bool = False
+    forced_embeddings: tuple[tuple[float, ...], ...] | None = None
+    model: str | None = "embeddinggemma"
+    calls: list[str | list[str] | tuple[str, ...]] = field(default_factory=list)
+
+    def embed(
+        self,
+        input_value: str | list[str] | tuple[str, ...],
+    ) -> OllamaEmbeddingResult:
+        self.calls.append(input_value)
+
+        if self.fail:
+            return OllamaEmbeddingResult(
+                succeeded=False,
+                embeddings=(),
+                model=None,
+                message="simulated embedding failure",
+            )
+
+        texts = (input_value,) if isinstance(input_value, str) else tuple(input_value)
+        embeddings = self.forced_embeddings
+
+        if embeddings is None:
+            embeddings = tuple(_embedding_for_text(text) for text in texts)
+
+        return OllamaEmbeddingResult(
+            succeeded=True,
+            embeddings=embeddings,
+            model=self.model,
+            message="generated test embeddings",
+        )
+
+
+def _embedding_for_text(text: str) -> tuple[float, ...]:
+    lowered = text.lower()
+
+    if "engine" in lowered or "oil" in lowered:
+        return (1.0, 0.0, 0.0)
+
+    if "tire" in lowered or "pressure" in lowered:
+        return (0.0, 1.0, 0.0)
+
+    return (0.0, 0.0, 1.0)
+
+
+def _write_manual(tmp_path: Path, *, name: str = "manual.md") -> Path:
+    path = tmp_path / name
+    path.write_text(
+        "# Engine\n"
+        "Engine oil pressure warnings require the vehicle to stop safely.\n\n"
+        "# Tires\n"
+        "Tire pressure must be checked before long-distance operation.\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_index_text_document_returns_typed_summary(tmp_path: Path) -> None:
+    client = FakeEmbeddingClient()
+
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(client, store)
+        result = service.index_text_document(_write_manual(tmp_path))
+
+        assert result.source_name == "manual.md"
+        assert result.section_count == 2
+        assert result.chunk_count == 2
+        assert result.stored_count == 2
+        assert result.embedding_model == "embeddinggemma"
+        assert result.vector_size == 3
+        assert service.count() == 2
+
+
+def test_index_text_document_sends_chunk_texts_as_one_batch(tmp_path: Path) -> None:
+    client = FakeEmbeddingClient()
+
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(client, store)
+        service.index_text_document(_write_manual(tmp_path))
+
+    assert len(client.calls) == 1
+    call = client.calls[0]
+    assert isinstance(call, list)
+    assert len(call) == 2
+    assert "Engine oil pressure" in call[0]
+    assert "Tire pressure" in call[1]
+
+
+def test_index_document_accepts_preingested_document(tmp_path: Path) -> None:
+    ingested = ingest_text_document(_write_manual(tmp_path))
+
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(FakeEmbeddingClient(), store)
+        result = service.index_document(ingested)
+
+        assert result.document_id == ingested.document.document_id
+        assert result.stored_count == len(ingested.chunks)
+
+
+def test_reindexing_same_document_replaces_existing_points(tmp_path: Path) -> None:
+    path = _write_manual(tmp_path)
+
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(FakeEmbeddingClient(), store)
+        service.index_text_document(path)
+        service.index_text_document(path)
+
+        assert service.count() == 2
+
+
+def test_recreate_collection_removes_previous_document(tmp_path: Path) -> None:
+    first_path = _write_manual(tmp_path, name="first.md")
+    second_path = tmp_path / "second.md"
+    second_path.write_text(
+        "# Battery\nBattery voltage must be monitored.",
+        encoding="utf-8",
+    )
+
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(FakeEmbeddingClient(), store)
+        service.index_text_document(first_path)
+        result = service.index_text_document(second_path, recreate_collection=True)
+
+        assert result.chunk_count == 1
+        assert service.count() == 1
+
+
+def test_custom_chunk_configuration_is_forwarded(tmp_path: Path) -> None:
+    path = tmp_path / "long.txt"
+    path.write_text(" ".join(f"word-{index}" for index in range(20)), encoding="utf-8")
+
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(FakeEmbeddingClient(), store)
+        result = service.index_text_document(
+            path,
+            default_title="Long section",
+            chunk_size_words=8,
+            overlap_words=2,
+        )
+
+        assert result.section_count == 1
+        assert result.chunk_count == 3
+        assert result.stored_count == 3
+
+
+def test_search_returns_best_matching_section(tmp_path: Path) -> None:
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(FakeEmbeddingClient(), store)
+        service.index_text_document(_write_manual(tmp_path))
+
+        response = service.search("  engine warning  ", limit=1)
+
+        assert response.query == "engine warning"
+        assert response.embedding_model == "embeddinggemma"
+        assert len(response.matches) == 1
+        assert response.matches[0].section_title == "Engine"
+        assert response.matches[0].score == pytest.approx(1.0)
+
+
+def test_search_forwards_score_threshold(tmp_path: Path) -> None:
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(FakeEmbeddingClient(), store)
+        service.index_text_document(_write_manual(tmp_path))
+
+        response = service.search("engine", score_threshold=1.1)
+
+        assert response.matches == ()
+
+
+def test_count_is_zero_before_indexing() -> None:
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(FakeEmbeddingClient(), store)
+
+        assert service.count() == 0
+
+
+def test_empty_search_query_is_rejected() -> None:
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(FakeEmbeddingClient(), store)
+
+        with pytest.raises(ValueError, match="must not be empty"):
+            service.search("   ")
+
+
+def test_search_before_indexing_reports_missing_collection() -> None:
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(FakeEmbeddingClient(), store)
+
+        with pytest.raises(RuntimeError, match="collection does not exist"):
+            service.search("engine")
+
+
+def test_indexing_embedding_failure_is_reported(tmp_path: Path) -> None:
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(FakeEmbeddingClient(fail=True), store)
+
+        with pytest.raises(RuntimeError, match="simulated embedding failure"):
+            service.index_text_document(_write_manual(tmp_path))
+
+        assert service.count() == 0
+
+
+def test_search_embedding_failure_is_reported(tmp_path: Path) -> None:
+    client = FakeEmbeddingClient()
+
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(client, store)
+        service.index_text_document(_write_manual(tmp_path))
+        client.fail = True
+
+        with pytest.raises(RuntimeError, match="simulated embedding failure"):
+            service.search("engine")
+
+
+def test_indexing_rejects_wrong_embedding_count(tmp_path: Path) -> None:
+    client = FakeEmbeddingClient(forced_embeddings=((1.0, 0.0, 0.0),))
+
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(client, store)
+
+        with pytest.raises(RuntimeError, match="count does not match"):
+            service.index_text_document(_write_manual(tmp_path))
+
+
+def test_search_rejects_multiple_query_embeddings(tmp_path: Path) -> None:
+    client = FakeEmbeddingClient()
+
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(client, store)
+        service.index_text_document(_write_manual(tmp_path))
+        client.forced_embeddings = ((1.0, 0.0, 0.0), (0.0, 1.0, 0.0))
+
+        with pytest.raises(RuntimeError, match="count does not match"):
+            service.search("engine")
+
+
+def test_successful_embedding_response_requires_model_name(tmp_path: Path) -> None:
+    client = FakeEmbeddingClient(model=None)
+
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(client, store)
+
+        with pytest.raises(RuntimeError, match="no model name"):
+            service.index_text_document(_write_manual(tmp_path))
+
+
+def test_inconsistent_embedding_dimensions_are_rejected(tmp_path: Path) -> None:
+    client = FakeEmbeddingClient(
+        forced_embeddings=((1.0, 0.0, 0.0), (0.0, 1.0)),
+    )
+
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(client, store)
+
+        with pytest.raises(RuntimeError, match="inconsistent vector dimensions"):
+            service.index_text_document(_write_manual(tmp_path))
+
+
+def test_non_finite_embedding_values_are_rejected(tmp_path: Path) -> None:
+    client = FakeEmbeddingClient(
+        forced_embeddings=((float("nan"), 0.0, 0.0), (0.0, 1.0, 0.0)),
+    )
+
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(client, store)
+
+        with pytest.raises(RuntimeError, match="non-finite"):
+            service.index_text_document(_write_manual(tmp_path))
+
+
+def test_invalid_search_limit_is_delegated_to_vector_store(tmp_path: Path) -> None:
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(FakeEmbeddingClient(), store)
+        service.index_text_document(_write_manual(tmp_path))
+
+        with pytest.raises(ValueError, match="limit must be greater than zero"):
+            service.search("engine", limit=0)

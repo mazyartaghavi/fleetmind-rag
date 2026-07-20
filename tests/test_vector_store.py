@@ -46,7 +46,7 @@ def test_context_manager_closes_owned_store() -> None:
     store = QdrantChunkStore.in_memory()
 
     with store:
-        assert not store.is_closed
+        store.ensure_collection(3)
 
     assert store.is_closed
     with pytest.raises(RuntimeError, match="closed"):

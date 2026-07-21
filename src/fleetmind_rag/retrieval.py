@@ -7,7 +7,11 @@ from typing import Protocol
 
 from fleetmind_rag.documents import IngestedDocument, ingest_text_document
 from fleetmind_rag.ollama import OllamaEmbeddingResult
-from fleetmind_rag.vector_store import QdrantChunkStore, VectorSearchResult
+from fleetmind_rag.vector_store import (
+    ChunkMetadataFilter,
+    QdrantChunkStore,
+    VectorSearchResult,
+)
 
 
 class EmbeddingClient(Protocol):
@@ -115,6 +119,7 @@ class DocumentRetrievalService:
         *,
         limit: int = 5,
         score_threshold: float | None = None,
+        metadata_filter: ChunkMetadataFilter | None = None,
     ) -> RetrievalResponse:
         """Embed one query and return the nearest indexed chunks."""
 
@@ -132,6 +137,7 @@ class DocumentRetrievalService:
             embeddings[0],
             limit=limit,
             score_threshold=score_threshold,
+            metadata_filter=metadata_filter,
         )
 
         return RetrievalResponse(

@@ -8,7 +8,7 @@ import pytest
 from fleetmind_rag.documents import ingest_text_document
 from fleetmind_rag.ollama import OllamaEmbeddingResult
 from fleetmind_rag.retrieval import DocumentRetrievalService
-from fleetmind_rag.vector_store import QdrantChunkStore
+from fleetmind_rag.vector_store import ChunkMetadataFilter, QdrantChunkStore
 
 
 @dataclass
@@ -290,3 +290,42 @@ def test_invalid_search_limit_is_delegated_to_vector_store(tmp_path: Path) -> No
 
         with pytest.raises(ValueError, match="limit must be greater than zero"):
             service.search("engine", limit=0)
+
+
+def test_search_forwards_section_title_metadata_filter(tmp_path: Path) -> None:
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(FakeEmbeddingClient(), store)
+        service.index_text_document(_write_manual(tmp_path))
+
+        response = service.search(
+            "engine",
+            metadata_filter=ChunkMetadataFilter(section_titles=("Tires",)),
+        )
+
+    assert len(response.matches) == 1
+    assert response.matches[0].section_title == "Tires"
+
+
+def test_search_forwards_document_id_metadata_filter(tmp_path: Path) -> None:
+    first_path = _write_manual(tmp_path, name="first.md")
+    second_path = tmp_path / "second.md"
+    second_path.write_text(
+        "# Battery\nBattery voltage must be monitored.",
+        encoding="utf-8",
+    )
+
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(FakeEmbeddingClient(), store)
+        service.index_text_document(first_path)
+        second_result = service.index_text_document(second_path)
+
+        response = service.search(
+            "engine",
+            metadata_filter=ChunkMetadataFilter(
+                document_ids=(second_result.document_id,)
+            ),
+        )
+
+    assert len(response.matches) == 1
+    assert response.matches[0].document_id == second_result.document_id
+    assert response.matches[0].section_title == "Battery"

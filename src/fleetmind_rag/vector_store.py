@@ -9,11 +9,101 @@ from typing import Any
 from uuid import NAMESPACE_URL, uuid5
 
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, PointStruct, VectorParams
+from qdrant_client.models import (
+    Condition,
+    Distance,
+    FieldCondition,
+    Filter,
+    MatchAny,
+    PointStruct,
+    VectorParams,
+)
 
 from fleetmind_rag.documents import DocumentChunk
 
 DEFAULT_COLLECTION_NAME = "fleetmind_document_chunks"
+
+
+@dataclass(frozen=True, slots=True)
+class ChunkMetadataFilter:
+    """Restrict chunk search by indexed Qdrant payload metadata.
+
+    Values within one field use OR semantics. Different populated fields use AND
+    semantics. For example, two document identifiers and one section title mean
+    "document A or B" AND "this section title".
+    """
+
+    document_ids: tuple[str, ...] = ()
+    section_ids: tuple[str, ...] = ()
+    section_titles: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "document_ids",
+            self._normalize_values(self.document_ids, field_name="document_ids"),
+        )
+        object.__setattr__(
+            self,
+            "section_ids",
+            self._normalize_values(self.section_ids, field_name="section_ids"),
+        )
+        object.__setattr__(
+            self,
+            "section_titles",
+            self._normalize_values(self.section_titles, field_name="section_titles"),
+        )
+
+        if not (self.document_ids or self.section_ids or self.section_titles):
+            raise ValueError(
+                "At least one chunk metadata filter criterion is required."
+            )
+
+    def to_qdrant_filter(self) -> Filter:
+        """Build the Qdrant payload filter represented by this value object."""
+
+        conditions: list[Condition] = []
+        self._append_condition(conditions, "document_id", self.document_ids)
+        self._append_condition(conditions, "section_id", self.section_ids)
+        self._append_condition(conditions, "section_title", self.section_titles)
+        return Filter(must=conditions)
+
+    @staticmethod
+    def _normalize_values(
+        values: Sequence[str],
+        *,
+        field_name: str,
+    ) -> tuple[str, ...]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+
+        for value in values:
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(
+                    "Chunk metadata filter "
+                    f"{field_name} must contain non-empty strings."
+                )
+
+            clean_value = value.strip()
+            if clean_value not in seen:
+                normalized.append(clean_value)
+                seen.add(clean_value)
+
+        return tuple(normalized)
+
+    @staticmethod
+    def _append_condition(
+        conditions: list[Condition],
+        payload_key: str,
+        values: tuple[str, ...],
+    ) -> None:
+        if values:
+            conditions.append(
+                FieldCondition(
+                    key=payload_key,
+                    match=MatchAny(any=list(values)),
+                )
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +272,7 @@ class QdrantChunkStore:
         *,
         limit: int = 5,
         score_threshold: float | None = None,
+        metadata_filter: ChunkMetadataFilter | None = None,
     ) -> tuple[VectorSearchResult, ...]:
         """Return the nearest stored document chunks."""
 
@@ -211,6 +302,11 @@ class QdrantChunkStore:
             query=list(query_vector),
             limit=limit,
             score_threshold=score_threshold,
+            query_filter=(
+                metadata_filter.to_qdrant_filter()
+                if metadata_filter is not None
+                else None
+            ),
             with_payload=True,
             with_vectors=False,
         )

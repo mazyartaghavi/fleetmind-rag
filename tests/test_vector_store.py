@@ -8,20 +8,23 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, VectorParams
 
 from fleetmind_rag.documents import DocumentChunk
-from fleetmind_rag.vector_store import QdrantChunkStore
+from fleetmind_rag.vector_store import ChunkMetadataFilter, QdrantChunkStore
 
 
 def make_chunk(
     ordinal: int,
     text: str,
     *,
+    document_id: str = "doc-one",
+    section_id: str | None = None,
     section_title: str = "Engine warnings",
 ) -> DocumentChunk:
     words = text.split()
+    resolved_section_id = section_id or f"{document_id}-section-001"
     return DocumentChunk(
-        chunk_id=f"doc-one-section-001-chunk-{ordinal:03d}",
-        document_id="doc-one",
-        section_id="doc-one-section-001",
+        chunk_id=f"{resolved_section_id}-chunk-{ordinal:03d}",
+        document_id=document_id,
+        section_id=resolved_section_id,
         section_title=section_title,
         ordinal=ordinal,
         text=text,
@@ -46,11 +49,12 @@ def test_context_manager_closes_owned_store() -> None:
     store = QdrantChunkStore.in_memory()
 
     with store:
-        store.ensure_collection(3)
+        assert not store.is_closed
 
-    assert store.is_closed
     with pytest.raises(RuntimeError, match="closed"):
         store.count()
+
+    assert store.is_closed
 
 
 def test_close_is_idempotent() -> None:
@@ -257,3 +261,124 @@ def test_persistent_local_store_round_trip(tmp_path: Path) -> None:
 
         assert len(results) == 1
         assert results[0].chunk_id == chunk.chunk_id
+
+
+def test_metadata_filter_normalizes_and_deduplicates_values() -> None:
+    metadata_filter = ChunkMetadataFilter(
+        document_ids=(" doc-one ", "doc-one", "doc-two"),
+        section_titles=(" Tires ",),
+    )
+
+    assert metadata_filter.document_ids == ("doc-one", "doc-two")
+    assert metadata_filter.section_titles == ("Tires",)
+
+
+def test_metadata_filter_requires_at_least_one_criterion() -> None:
+    with pytest.raises(ValueError, match="At least one"):
+        ChunkMetadataFilter()
+
+
+@pytest.mark.parametrize(
+    ("field_name", "values"),
+    [
+        ("document_ids", ("",)),
+        ("section_ids", ("   ",)),
+        ("section_titles", ("Engine", " ")),
+    ],
+)
+def test_metadata_filter_rejects_blank_values(
+    field_name: str,
+    values: tuple[str, ...],
+) -> None:
+    with pytest.raises(ValueError, match=field_name):
+        ChunkMetadataFilter(**{field_name: values})
+
+
+def test_search_filters_by_document_id() -> None:
+    chunks = [
+        make_chunk(1, "engine warning", document_id="doc-one"),
+        make_chunk(1, "engine warning", document_id="doc-two"),
+    ]
+
+    with QdrantChunkStore.in_memory() as store:
+        store.upsert_chunks(chunks, [[1.0, 0.0], [1.0, 0.0]])
+        results = store.search(
+            [1.0, 0.0],
+            metadata_filter=ChunkMetadataFilter(document_ids=("doc-two",)),
+        )
+
+    assert [result.document_id for result in results] == ["doc-two"]
+
+
+def test_search_filters_by_section_title() -> None:
+    chunks = [
+        make_chunk(1, "engine warning", section_title="Engine"),
+        make_chunk(2, "tire pressure", section_title="Tires"),
+    ]
+
+    with QdrantChunkStore.in_memory() as store:
+        store.upsert_chunks(chunks, [[1.0, 0.0], [0.0, 1.0]])
+        results = store.search(
+            [1.0, 0.0],
+            metadata_filter=ChunkMetadataFilter(section_titles=("Tires",)),
+        )
+
+    assert [result.section_title for result in results] == ["Tires"]
+
+
+def test_search_uses_or_semantics_within_one_metadata_field() -> None:
+    chunks = [
+        make_chunk(1, "one", document_id="doc-one"),
+        make_chunk(1, "two", document_id="doc-two"),
+        make_chunk(1, "three", document_id="doc-three"),
+    ]
+
+    with QdrantChunkStore.in_memory() as store:
+        store.upsert_chunks(
+            chunks,
+            [[1.0, 0.0], [0.9, 0.1], [0.8, 0.2]],
+        )
+        results = store.search(
+            [1.0, 0.0],
+            limit=3,
+            metadata_filter=ChunkMetadataFilter(document_ids=("doc-one", "doc-three")),
+        )
+
+    assert {result.document_id for result in results} == {"doc-one", "doc-three"}
+
+
+def test_search_uses_and_semantics_across_metadata_fields() -> None:
+    chunks = [
+        make_chunk(1, "one", document_id="doc-one", section_title="Engine"),
+        make_chunk(1, "two", document_id="doc-two", section_title="Engine"),
+        make_chunk(2, "three", document_id="doc-two", section_title="Tires"),
+    ]
+
+    with QdrantChunkStore.in_memory() as store:
+        store.upsert_chunks(
+            chunks,
+            [[1.0, 0.0], [0.9, 0.1], [0.8, 0.2]],
+        )
+        results = store.search(
+            [1.0, 0.0],
+            limit=3,
+            metadata_filter=ChunkMetadataFilter(
+                document_ids=("doc-two",),
+                section_titles=("Engine",),
+            ),
+        )
+
+    assert len(results) == 1
+    assert results[0].document_id == "doc-two"
+    assert results[0].section_title == "Engine"
+
+
+def test_search_returns_empty_tuple_when_metadata_filter_has_no_match() -> None:
+    with QdrantChunkStore.in_memory() as store:
+        store.upsert_chunks([make_chunk(1, "engine")], [[1.0, 0.0]])
+        results = store.search(
+            [1.0, 0.0],
+            metadata_filter=ChunkMetadataFilter(document_ids=("missing",)),
+        )
+
+    assert results == ()

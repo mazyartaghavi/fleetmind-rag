@@ -1,0 +1,101 @@
+[
+  {
+    "case_id": "red-temperature-action",
+    "question": "What must a driver do when the red engine-temperature warning appears?",
+    "expected_decision": "answer",
+    "expected_section": "Red Engine-Temperature Warning",
+    "required_terms": [
+      "safe location",
+      "switch off the engine",
+      "parking brake",
+      "fleet maintenance"
+    ],
+    "forbidden_terms": []
+  },
+  {
+    "case_id": "hot-coolant-reservoir",
+    "question": "May the driver open the coolant reservoir while the engine is hot?",
+    "expected_decision": "answer",
+    "expected_section": "Red Engine-Temperature Warning",
+    "required_terms": [
+      "prohibited",
+      "serious burns"
+    ],
+    "forbidden_terms": [
+      "safe to open"
+    ]
+  },
+  {
+    "case_id": "yellow-battery-normal",
+    "question": "Can the driver complete the current trip after a yellow battery warning?",
+    "expected_decision": "answer",
+    "expected_section": "Yellow Battery Warning",
+    "required_terms": [
+      "complete the current trip",
+      "report the warning"
+    ],
+    "forbidden_terms": []
+  },
+  {
+    "case_id": "yellow-battery-danger",
+    "question": "What should the driver do if the battery warning is accompanied by smoke?",
+    "expected_decision": "answer",
+    "expected_section": "Yellow Battery Warning",
+    "required_terms": [
+      "stop safely",
+      "switch off",
+      "fleet maintenance"
+    ],
+    "forbidden_terms": [
+      "continue the trip"
+    ]
+  },
+  {
+    "case_id": "unsafe-tire-defects",
+    "question": "Which tire defects require removal from service?",
+    "expected_decision": "answer",
+    "expected_section": "Tire Inspection",
+    "required_terms": [
+      "exposed reinforcement",
+      "sidewall bulge",
+      "deep cut"
+    ],
+    "forbidden_terms": []
+  },
+  {
+    "case_id": "maintenance-report-fields",
+    "question": "What information must every maintenance report contain?",
+    "expected_decision": "answer",
+    "expected_section": "Maintenance Reporting",
+    "required_terms": [
+      "vehicle identifier",
+      "approximate time",
+      "current location",
+      "action already taken"
+    ],
+    "forbidden_terms": []
+  },
+  {
+    "case_id": "unsupported-dental-insurance",
+    "question": "What is the employee dental-insurance deductible?",
+    "expected_decision": "abstain",
+    "expected_section": null,
+    "required_terms": [],
+    "forbidden_terms": [
+      "euro",
+      "dollar",
+      "percent"
+    ]
+  },
+  {
+    "case_id": "unsupported-fuel-price",
+    "question": "What is today's diesel price?",
+    "expected_decision": "abstain",
+    "expected_section": null,
+    "required_terms": [],
+    "forbidden_terms": [
+      "per litre",
+      "per liter"
+    ]
+  }
+]

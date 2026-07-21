@@ -8,7 +8,11 @@ import pytest
 from fleetmind_rag.documents import ingest_text_document
 from fleetmind_rag.ollama import OllamaEmbeddingResult
 from fleetmind_rag.retrieval import DocumentRetrievalService
-from fleetmind_rag.vector_store import ChunkMetadataFilter, QdrantChunkStore
+from fleetmind_rag.vector_store import (
+    ChunkMetadataFilter,
+    QdrantChunkStore,
+    VectorSearchResult,
+)
 
 
 @dataclass
@@ -529,3 +533,288 @@ def test_hybrid_search_embedding_failure_is_reported(tmp_path: Path) -> None:
 
         with pytest.raises(RuntimeError, match="simulated embedding failure"):
             service.search_hybrid("engine warning")
+
+
+def _vector_result(
+    *,
+    chunk_id: str,
+    section_title: str,
+    text: str,
+    score: float,
+    ordinal: int,
+) -> VectorSearchResult:
+    return VectorSearchResult(
+        chunk_id=chunk_id,
+        document_id="doc-test",
+        section_id=f"section-{ordinal}",
+        section_title=section_title,
+        ordinal=ordinal,
+        text=text,
+        word_count=len(text.split()),
+        start_word=ordinal * 10,
+        end_word=ordinal * 10 + len(text.split()),
+        score=score,
+    )
+
+
+def test_hybrid_reranked_search_returns_explainable_response(tmp_path: Path) -> None:
+    client = FakeEmbeddingClient()
+
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(client, store)
+        service.index_text_document(_write_manual(tmp_path))
+        calls_after_indexing = len(client.calls)
+
+        response = service.search_hybrid_reranked(
+            "tire pressure",
+            limit=2,
+            candidate_limit=2,
+        )
+
+    assert response.query == "tire pressure"
+    assert response.algorithm == "hybrid-rrf-lexical-rerank-v1"
+    assert response.embedding_model == "embeddinggemma"
+    assert response.dense_match_count == 2
+    assert response.sparse_match_count == 2
+    assert response.candidate_count == 2
+    assert response.matches[0].section_title == "Tires"
+    assert response.matches[0].hybrid_score > 0
+    assert 0 < response.matches[0].score <= 1
+    assert response.matches[0].lexical_coverage == pytest.approx(1.0)
+    assert response.matches[0].exact_phrase_match
+    assert len(client.calls) == calls_after_indexing + 1
+
+
+def test_hybrid_reranker_can_promote_complete_term_coverage() -> None:
+    first = _vector_result(
+        chunk_id="first",
+        section_title="General",
+        text="Vehicle maintenance information.",
+        score=0.032,
+        ordinal=0,
+    )
+    second = _vector_result(
+        chunk_id="second",
+        section_title="Tires",
+        text="A sidewall bulge requires the tire to be removed.",
+        score=0.016,
+        ordinal=1,
+    )
+
+    matches = DocumentRetrievalService._rerank_hybrid_matches(
+        query="sidewall bulge",
+        matches=(first, second),
+        limit=2,
+        hybrid_score_weight=0.1,
+        lexical_coverage_weight=0.9,
+        section_title_weight=0.0,
+        exact_phrase_weight=0.0,
+    )
+
+    assert matches[0].chunk_id == "second"
+    assert matches[0].original_rank == 2
+    assert matches[0].lexical_coverage == pytest.approx(1.0)
+
+
+def test_hybrid_reranker_uses_section_title_coverage() -> None:
+    general = _vector_result(
+        chunk_id="general",
+        section_title="General",
+        text="Charging system information.",
+        score=0.02,
+        ordinal=0,
+    )
+    battery = _vector_result(
+        chunk_id="battery",
+        section_title="Battery Warning",
+        text="Charging system information.",
+        score=0.02,
+        ordinal=1,
+    )
+
+    matches = DocumentRetrievalService._rerank_hybrid_matches(
+        query="battery warning",
+        matches=(general, battery),
+        limit=2,
+        hybrid_score_weight=0.0,
+        lexical_coverage_weight=0.0,
+        section_title_weight=1.0,
+        exact_phrase_weight=0.0,
+    )
+
+    assert matches[0].chunk_id == "battery"
+    assert matches[0].section_title_coverage == pytest.approx(1.0)
+
+
+def test_hybrid_reranker_rewards_exact_phrase_match() -> None:
+    separated = _vector_result(
+        chunk_id="separated",
+        section_title="General",
+        text="The battery charging system displays a warning.",
+        score=0.02,
+        ordinal=0,
+    )
+    exact = _vector_result(
+        chunk_id="exact",
+        section_title="General",
+        text="A battery warning requires inspection.",
+        score=0.02,
+        ordinal=1,
+    )
+
+    matches = DocumentRetrievalService._rerank_hybrid_matches(
+        query="battery warning",
+        matches=(separated, exact),
+        limit=2,
+        hybrid_score_weight=0.0,
+        lexical_coverage_weight=0.0,
+        section_title_weight=0.0,
+        exact_phrase_weight=1.0,
+    )
+
+    assert matches[0].chunk_id == "exact"
+    assert matches[0].exact_phrase_match
+    assert not matches[1].exact_phrase_match
+
+
+def test_hybrid_reranked_search_forwards_metadata_filter(tmp_path: Path) -> None:
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(FakeEmbeddingClient(), store)
+        service.index_text_document(_write_manual(tmp_path))
+
+        response = service.search_hybrid_reranked(
+            "tire pressure",
+            metadata_filter=ChunkMetadataFilter(section_titles=("Engine",)),
+        )
+
+    assert {match.section_title for match in response.matches} == {"Engine"}
+
+
+def test_hybrid_reranked_search_handles_empty_candidate_set(tmp_path: Path) -> None:
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(FakeEmbeddingClient(), store)
+        service.index_text_document(_write_manual(tmp_path))
+
+        response = service.search_hybrid_reranked(
+            "automobile",
+            score_threshold=1.1,
+        )
+
+    assert response.candidate_count == 0
+    assert response.matches == ()
+
+
+def test_hybrid_reranked_search_rejects_empty_query() -> None:
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(FakeEmbeddingClient(), store)
+
+        with pytest.raises(ValueError, match="must not be empty"):
+            service.search_hybrid_reranked("   ")
+
+
+@pytest.mark.parametrize(
+    ("limit", "candidate_limit", "message"),
+    [
+        (0, 20, "result limit"),
+        (-1, 20, "result limit"),
+        (5, 4, "candidate limit"),
+    ],
+)
+def test_hybrid_reranked_search_rejects_invalid_limits(
+    limit: int,
+    candidate_limit: int,
+    message: str,
+) -> None:
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(FakeEmbeddingClient(), store)
+
+        with pytest.raises(ValueError, match=message):
+            service.search_hybrid_reranked(
+                "warning",
+                limit=limit,
+                candidate_limit=candidate_limit,
+            )
+
+
+@pytest.mark.parametrize(
+    ("weight_name", "weight", "message"),
+    [
+        ("hybrid", -0.1, "hybrid score reranking weight"),
+        ("lexical", float("nan"), "lexical coverage reranking weight"),
+        ("title", float("inf"), "section-title coverage reranking weight"),
+        ("phrase", -1.0, "exact-phrase reranking weight"),
+    ],
+)
+def test_hybrid_reranked_search_rejects_invalid_weights(
+    weight_name: str,
+    weight: float,
+    message: str,
+) -> None:
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(FakeEmbeddingClient(), store)
+
+        with pytest.raises(ValueError, match=message):
+            if weight_name == "hybrid":
+                service.search_hybrid_reranked(
+                    "warning",
+                    hybrid_score_weight=weight,
+                )
+            elif weight_name == "lexical":
+                service.search_hybrid_reranked(
+                    "warning",
+                    lexical_coverage_weight=weight,
+                )
+            elif weight_name == "title":
+                service.search_hybrid_reranked(
+                    "warning",
+                    section_title_weight=weight,
+                )
+            else:
+                service.search_hybrid_reranked(
+                    "warning",
+                    exact_phrase_weight=weight,
+                )
+
+
+def test_hybrid_reranked_search_requires_one_positive_weight() -> None:
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(FakeEmbeddingClient(), store)
+
+        with pytest.raises(ValueError, match="At least one reranking weight"):
+            service.search_hybrid_reranked(
+                "warning",
+                hybrid_score_weight=0.0,
+                lexical_coverage_weight=0.0,
+                section_title_weight=0.0,
+                exact_phrase_weight=0.0,
+            )
+
+
+def test_hybrid_reranker_uses_original_rank_for_deterministic_ties() -> None:
+    first = _vector_result(
+        chunk_id="first",
+        section_title="General",
+        text="warning information",
+        score=0.02,
+        ordinal=0,
+    )
+    second = _vector_result(
+        chunk_id="second",
+        section_title="General",
+        text="warning information",
+        score=0.02,
+        ordinal=1,
+    )
+
+    matches = DocumentRetrievalService._rerank_hybrid_matches(
+        query="warning",
+        matches=(first, second),
+        limit=2,
+        hybrid_score_weight=1.0,
+        lexical_coverage_weight=1.0,
+        section_title_weight=1.0,
+        exact_phrase_weight=1.0,
+    )
+
+    assert [match.chunk_id for match in matches] == ["first", "second"]
+    assert [match.original_rank for match in matches] == [1, 2]

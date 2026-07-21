@@ -46,6 +46,15 @@ class RetrievalResponse:
     matches: tuple[VectorSearchResult, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class SparseRetrievalResponse:
+    """Ranked lexical-search results for one normalized query."""
+
+    query: str
+    algorithm: str
+    matches: tuple[VectorSearchResult, ...]
+
+
 class DocumentRetrievalService:
     """Coordinate document ingestion, embedding, indexing, and retrieval."""
 
@@ -143,6 +152,35 @@ class DocumentRetrievalService:
         return RetrievalResponse(
             query=clean_query,
             embedding_model=embedding_model,
+            matches=matches,
+        )
+
+    def search_sparse(
+        self,
+        query: str,
+        *,
+        limit: int = 5,
+        metadata_filter: ChunkMetadataFilter | None = None,
+        k1: float = 1.5,
+        b: float = 0.75,
+    ) -> SparseRetrievalResponse:
+        """Return deterministic BM25 lexical matches without embedding the query."""
+
+        clean_query = query.strip()
+        if not clean_query:
+            raise ValueError("The retrieval query must not be empty.")
+
+        matches = self._vector_store.search_sparse(
+            clean_query,
+            limit=limit,
+            metadata_filter=metadata_filter,
+            k1=k1,
+            b=b,
+        )
+
+        return SparseRetrievalResponse(
+            query=clean_query,
+            algorithm="bm25-local-v1",
             matches=matches,
         )
 

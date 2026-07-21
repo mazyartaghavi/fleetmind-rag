@@ -329,3 +329,43 @@ def test_search_forwards_document_id_metadata_filter(tmp_path: Path) -> None:
     assert len(response.matches) == 1
     assert response.matches[0].document_id == second_result.document_id
     assert response.matches[0].section_title == "Battery"
+
+
+def test_sparse_search_returns_bm25_response_without_embedding_query(
+    tmp_path: Path,
+) -> None:
+    client = FakeEmbeddingClient()
+
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(client, store)
+        service.index_text_document(_write_manual(tmp_path))
+        calls_after_indexing = len(client.calls)
+
+        response = service.search_sparse("tire pressure", limit=1)
+
+    assert response.query == "tire pressure"
+    assert response.algorithm == "bm25-local-v1"
+    assert len(response.matches) == 1
+    assert response.matches[0].section_title == "Tires"
+    assert len(client.calls) == calls_after_indexing
+
+
+def test_sparse_search_forwards_metadata_filter(tmp_path: Path) -> None:
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(FakeEmbeddingClient(), store)
+        service.index_text_document(_write_manual(tmp_path))
+
+        response = service.search_sparse(
+            "tire",
+            metadata_filter=ChunkMetadataFilter(section_titles=("Engine",)),
+        )
+
+    assert response.matches == ()
+
+
+def test_sparse_search_rejects_empty_query() -> None:
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(FakeEmbeddingClient(), store)
+
+        with pytest.raises(ValueError, match="must not be empty"):
+            service.search_sparse("   ")

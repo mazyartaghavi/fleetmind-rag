@@ -382,3 +382,110 @@ def test_search_returns_empty_tuple_when_metadata_filter_has_no_match() -> None:
         )
 
     assert results == ()
+
+
+def test_sparse_search_ranks_exact_lexical_matches() -> None:
+    chunks = [
+        make_chunk(1, "battery charging system inspection"),
+        make_chunk(2, "engine coolant temperature alert"),
+        make_chunk(3, "battery warning requires dispatch report"),
+    ]
+
+    with QdrantChunkStore.in_memory() as store:
+        store.upsert_chunks(
+            chunks,
+            [[1.0, 0.0], [0.0, 1.0], [0.5, 0.5]],
+        )
+        results = store.search_sparse("battery warning", limit=3)
+
+    assert [result.chunk_id for result in results] == [
+        chunks[2].chunk_id,
+        chunks[0].chunk_id,
+    ]
+    assert results[0].score > results[1].score > 0
+
+
+def test_sparse_search_is_case_and_punctuation_insensitive() -> None:
+    chunk = make_chunk(1, "Pressurized coolant can cause serious burns.")
+
+    with QdrantChunkStore.in_memory() as store:
+        store.upsert_chunks([chunk], [[1.0, 0.0]])
+        results = store.search_sparse("COOLANT, burns!")
+
+    assert [result.chunk_id for result in results] == [chunk.chunk_id]
+
+
+def test_sparse_search_returns_no_results_without_term_overlap() -> None:
+    with QdrantChunkStore.in_memory() as store:
+        store.upsert_chunks([make_chunk(1, "engine warning")], [[1.0, 0.0]])
+
+        assert store.search_sparse("dental insurance") == ()
+
+
+def test_sparse_search_applies_metadata_filter() -> None:
+    chunks = [
+        make_chunk(1, "warning report", section_title="Engine"),
+        make_chunk(2, "warning report", section_title="Tires"),
+    ]
+
+    with QdrantChunkStore.in_memory() as store:
+        store.upsert_chunks(chunks, [[1.0, 0.0], [0.0, 1.0]])
+        results = store.search_sparse(
+            "warning report",
+            metadata_filter=ChunkMetadataFilter(section_titles=("Tires",)),
+        )
+
+    assert [result.section_title for result in results] == ["Tires"]
+
+
+def test_sparse_search_uses_deterministic_tie_breaking() -> None:
+    chunks = [
+        make_chunk(2, "battery warning"),
+        make_chunk(1, "battery warning"),
+    ]
+
+    with QdrantChunkStore.in_memory() as store:
+        store.upsert_chunks(chunks, [[1.0, 0.0], [0.0, 1.0]])
+        results = store.search_sparse("battery warning", limit=2)
+
+    assert [result.ordinal for result in results] == [1, 2]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"limit": 0}, "limit"),
+        ({"k1": 0.0}, "k1"),
+        ({"k1": float("nan")}, "k1"),
+        ({"b": -0.1}, "b parameter"),
+        ({"b": 1.1}, "b parameter"),
+    ],
+)
+def test_sparse_search_rejects_invalid_parameters(
+    kwargs: dict[str, Any],
+    message: str,
+) -> None:
+    with QdrantChunkStore.in_memory() as store:
+        store.ensure_collection(2)
+
+        with pytest.raises(ValueError, match=message):
+            store.search_sparse("warning", **kwargs)
+
+
+def test_sparse_search_rejects_blank_or_nonlexical_query() -> None:
+    with QdrantChunkStore.in_memory() as store:
+        store.ensure_collection(2)
+
+        with pytest.raises(ValueError, match="must not be empty"):
+            store.search_sparse("   ")
+
+        with pytest.raises(ValueError, match="lexical term"):
+            store.search_sparse("--- !!!")
+
+
+def test_sparse_search_requires_existing_collection() -> None:
+    with (
+        QdrantChunkStore.in_memory() as store,
+        pytest.raises(RuntimeError, match="does not exist"),
+    ):
+        store.search_sparse("warning")

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import math
+import re
+from collections import Counter
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import TracebackType
 from typing import Any
@@ -108,7 +110,7 @@ class ChunkMetadataFilter:
 
 @dataclass(frozen=True, slots=True)
 class VectorSearchResult:
-    """A document chunk returned by a vector similarity search."""
+    """A document chunk returned by dense or sparse retrieval."""
 
     chunk_id: str
     document_id: str
@@ -313,6 +315,110 @@ class QdrantChunkStore:
 
         return tuple(self._parse_search_result(point) for point in response.points)
 
+    def search_sparse(
+        self,
+        query: str,
+        *,
+        limit: int = 5,
+        metadata_filter: ChunkMetadataFilter | None = None,
+        k1: float = 1.5,
+        b: float = 0.75,
+    ) -> tuple[VectorSearchResult, ...]:
+        """Return BM25-ranked chunks without generating an embedding.
+
+        The implementation reads payloads from Qdrant, applies any payload filter in
+        Qdrant, and computes deterministic BM25 scores over the remaining chunks.
+        """
+
+        self._require_open()
+
+        clean_query = query.strip()
+        if not clean_query:
+            raise ValueError("The sparse search query must not be empty.")
+
+        if limit <= 0:
+            raise ValueError("The sparse search limit must be greater than zero.")
+
+        if not math.isfinite(k1) or k1 <= 0:
+            raise ValueError(
+                "The BM25 k1 parameter must be finite and greater than zero."
+            )
+
+        if not math.isfinite(b) or not 0 <= b <= 1:
+            raise ValueError(
+                "The BM25 b parameter must be finite and between zero and one."
+            )
+
+        if not self._client.collection_exists(self._collection_name):
+            raise RuntimeError(
+                f"The Qdrant collection does not exist: {self._collection_name!r}."
+            )
+
+        query_terms = tuple(dict.fromkeys(self._tokenize_lexical(clean_query)))
+        if not query_terms:
+            raise ValueError(
+                "The sparse search query must contain at least one lexical term."
+            )
+
+        candidates = self._scroll_payload_results(metadata_filter=metadata_filter)
+        tokenized_candidates = tuple(
+            (candidate, self._tokenize_lexical(candidate.text))
+            for candidate in candidates
+        )
+        searchable_candidates = tuple(
+            (candidate, terms) for candidate, terms in tokenized_candidates if terms
+        )
+
+        if not searchable_candidates:
+            return ()
+
+        document_count = len(searchable_candidates)
+        average_length = (
+            sum(len(terms) for _, terms in searchable_candidates) / document_count
+        )
+        candidate_term_sets = tuple(set(terms) for _, terms in searchable_candidates)
+        document_frequency = {
+            term: sum(1 for term_set in candidate_term_sets if term in term_set)
+            for term in query_terms
+        }
+
+        ranked: list[VectorSearchResult] = []
+        for candidate, terms in searchable_candidates:
+            frequencies = Counter(terms)
+            document_length = len(terms)
+            score = 0.0
+
+            for term in query_terms:
+                frequency = frequencies.get(term, 0)
+                if frequency == 0:
+                    continue
+
+                term_document_frequency = document_frequency[term]
+                inverse_document_frequency = math.log(
+                    1
+                    + (document_count - term_document_frequency + 0.5)
+                    / (term_document_frequency + 0.5)
+                )
+                normalization = frequency + k1 * (
+                    1 - b + b * document_length / average_length
+                )
+                score += inverse_document_frequency * (
+                    frequency * (k1 + 1) / normalization
+                )
+
+            if score > 0:
+                ranked.append(replace(candidate, score=score))
+
+        ranked.sort(
+            key=lambda result: (
+                -result.score,
+                result.document_id,
+                result.ordinal,
+                result.chunk_id,
+            )
+        )
+        return tuple(ranked[:limit])
+
     def count(self) -> int:
         """Return the exact number of points stored in the collection."""
 
@@ -351,6 +457,39 @@ class QdrantChunkStore:
     ) -> None:
         del exc_type, exc_value, traceback
         self.close()
+
+    def _scroll_payload_results(
+        self,
+        *,
+        metadata_filter: ChunkMetadataFilter | None,
+    ) -> tuple[VectorSearchResult, ...]:
+        results: list[VectorSearchResult] = []
+        offset: Any = None
+        query_filter = (
+            metadata_filter.to_qdrant_filter() if metadata_filter is not None else None
+        )
+
+        while True:
+            points, next_offset = self._client.scroll(
+                collection_name=self._collection_name,
+                scroll_filter=query_filter,
+                limit=256,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            results.extend(
+                self._parse_payload_result(point.payload, score=0.0) for point in points
+            )
+
+            if next_offset is None:
+                return tuple(results)
+
+            offset = next_offset
+
+    @staticmethod
+    def _tokenize_lexical(text: str) -> tuple[str, ...]:
+        return tuple(re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)?", text.lower()))
 
     def _validate_collection_configuration(self, vector_size: int) -> None:
         configured_vector_size = self._collection_vector_size()
@@ -417,8 +556,15 @@ class QdrantChunkStore:
 
     @classmethod
     def _parse_search_result(cls, point: Any) -> VectorSearchResult:
-        payload = point.payload
+        return cls._parse_payload_result(point.payload, score=float(point.score))
 
+    @classmethod
+    def _parse_payload_result(
+        cls,
+        payload: Any,
+        *,
+        score: float,
+    ) -> VectorSearchResult:
         if not isinstance(payload, dict):
             raise RuntimeError("A Qdrant search result has no valid payload.")
 
@@ -432,7 +578,7 @@ class QdrantChunkStore:
             word_count=cls._require_payload_int(payload, "word_count"),
             start_word=cls._require_payload_int(payload, "start_word"),
             end_word=cls._require_payload_int(payload, "end_word"),
-            score=float(point.score),
+            score=score,
         )
 
     @staticmethod

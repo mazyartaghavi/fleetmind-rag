@@ -24,3 +24,6 @@ coverage.xml
 
 # Local Qdrant vector database
 data/qdrant_local/
+
+# Generated local RAG evaluation reports
+evaluation/reports/

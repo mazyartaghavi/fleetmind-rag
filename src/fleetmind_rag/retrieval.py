@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
@@ -52,6 +52,18 @@ class SparseRetrievalResponse:
 
     query: str
     algorithm: str
+    matches: tuple[VectorSearchResult, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class HybridRetrievalResponse:
+    """Reciprocal-rank-fused dense and sparse retrieval results."""
+
+    query: str
+    algorithm: str
+    embedding_model: str
+    dense_match_count: int
+    sparse_match_count: int
     matches: tuple[VectorSearchResult, ...]
 
 
@@ -184,10 +196,135 @@ class DocumentRetrievalService:
             matches=matches,
         )
 
+    def search_hybrid(
+        self,
+        query: str,
+        *,
+        limit: int = 5,
+        candidate_limit: int = 20,
+        score_threshold: float | None = None,
+        metadata_filter: ChunkMetadataFilter | None = None,
+        rrf_k: float = 60.0,
+        dense_weight: float = 1.0,
+        sparse_weight: float = 1.0,
+        k1: float = 1.5,
+        b: float = 0.75,
+    ) -> HybridRetrievalResponse:
+        """Fuse dense and BM25 rankings with weighted reciprocal rank fusion."""
+
+        clean_query = query.strip()
+        if not clean_query:
+            raise ValueError("The retrieval query must not be empty.")
+
+        if limit <= 0:
+            raise ValueError("The hybrid result limit must be greater than zero.")
+
+        if candidate_limit < limit:
+            raise ValueError(
+                "The hybrid candidate limit must be greater than or equal to "
+                "the result limit."
+            )
+
+        if not math.isfinite(rrf_k) or rrf_k <= 0:
+            raise ValueError(
+                "The reciprocal-rank constant must be finite and greater than zero."
+            )
+
+        for label, weight in (
+            ("dense", dense_weight),
+            ("sparse", sparse_weight),
+        ):
+            if not math.isfinite(weight) or weight <= 0:
+                raise ValueError(
+                    f"The {label} hybrid weight must be finite and greater than zero."
+                )
+
+        embedding_result = self._embedding_client.embed(clean_query)
+        embeddings, embedding_model = self._validated_embedding_response(
+            embedding_result,
+            expected_count=1,
+        )
+        dense_matches = self._vector_store.search(
+            embeddings[0],
+            limit=candidate_limit,
+            score_threshold=score_threshold,
+            metadata_filter=metadata_filter,
+        )
+        sparse_matches = self._vector_store.search_sparse(
+            clean_query,
+            limit=candidate_limit,
+            metadata_filter=metadata_filter,
+            k1=k1,
+            b=b,
+        )
+        matches = self._fuse_reciprocal_ranks(
+            dense_matches=dense_matches,
+            sparse_matches=sparse_matches,
+            limit=limit,
+            rrf_k=rrf_k,
+            dense_weight=dense_weight,
+            sparse_weight=sparse_weight,
+        )
+
+        return HybridRetrievalResponse(
+            query=clean_query,
+            algorithm="rrf-dense-bm25-v1",
+            embedding_model=embedding_model,
+            dense_match_count=len(dense_matches),
+            sparse_match_count=len(sparse_matches),
+            matches=matches,
+        )
+
     def count(self) -> int:
         """Return the number of indexed chunks."""
 
         return self._vector_store.count()
+
+    @staticmethod
+    def _fuse_reciprocal_ranks(
+        *,
+        dense_matches: tuple[VectorSearchResult, ...],
+        sparse_matches: tuple[VectorSearchResult, ...],
+        limit: int,
+        rrf_k: float,
+        dense_weight: float,
+        sparse_weight: float,
+    ) -> tuple[VectorSearchResult, ...]:
+        representatives: dict[str, VectorSearchResult] = {}
+        fused_scores: dict[str, float] = {}
+        dense_ranks: dict[str, int] = {}
+        sparse_ranks: dict[str, int] = {}
+
+        for rank, match in enumerate(dense_matches, start=1):
+            representatives.setdefault(match.chunk_id, match)
+            dense_ranks[match.chunk_id] = rank
+            fused_scores[match.chunk_id] = fused_scores.get(match.chunk_id, 0.0) + (
+                dense_weight / (rrf_k + rank)
+            )
+
+        for rank, match in enumerate(sparse_matches, start=1):
+            representatives.setdefault(match.chunk_id, match)
+            sparse_ranks[match.chunk_id] = rank
+            fused_scores[match.chunk_id] = fused_scores.get(match.chunk_id, 0.0) + (
+                sparse_weight / (rrf_k + rank)
+            )
+
+        fused = [
+            replace(representatives[chunk_id], score=score)
+            for chunk_id, score in fused_scores.items()
+        ]
+        fallback_rank = len(dense_matches) + len(sparse_matches) + 1
+        fused.sort(
+            key=lambda match: (
+                -match.score,
+                dense_ranks.get(match.chunk_id, fallback_rank),
+                sparse_ranks.get(match.chunk_id, fallback_rank),
+                match.document_id,
+                match.ordinal,
+                match.chunk_id,
+            )
+        )
+        return tuple(fused[:limit])
 
     @staticmethod
     def _validated_embedding_response(

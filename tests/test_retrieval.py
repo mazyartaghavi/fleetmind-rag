@@ -369,3 +369,163 @@ def test_sparse_search_rejects_empty_query() -> None:
 
         with pytest.raises(ValueError, match="must not be empty"):
             service.search_sparse("   ")
+
+
+def test_hybrid_search_fuses_dense_and_sparse_rankings(tmp_path: Path) -> None:
+    client = FakeEmbeddingClient()
+
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(client, store)
+        service.index_text_document(_write_manual(tmp_path))
+        calls_after_indexing = len(client.calls)
+
+        response = service.search_hybrid("tire pressure", limit=2)
+
+    assert response.query == "tire pressure"
+    assert response.algorithm == "rrf-dense-bm25-v1"
+    assert response.embedding_model == "embeddinggemma"
+    assert response.dense_match_count == 2
+    assert response.sparse_match_count == 2
+    assert response.matches[0].section_title == "Tires"
+    assert response.matches[0].score > response.matches[1].score > 0
+    assert len(client.calls) == calls_after_indexing + 1
+
+
+def test_hybrid_search_sparse_weight_can_promote_lexical_match(tmp_path: Path) -> None:
+    client = FakeEmbeddingClient()
+
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(client, store)
+        service.index_text_document(_write_manual(tmp_path))
+        client.forced_embeddings = ((1.0, 0.0, 0.0),)
+
+        response = service.search_hybrid(
+            "tire pressure",
+            limit=1,
+            dense_weight=1.0,
+            sparse_weight=2.0,
+        )
+
+    assert response.matches[0].section_title == "Tires"
+
+
+def test_hybrid_search_returns_dense_only_matches_when_sparse_has_none(
+    tmp_path: Path,
+) -> None:
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(FakeEmbeddingClient(), store)
+        service.index_text_document(_write_manual(tmp_path))
+
+        response = service.search_hybrid("automobile", limit=2)
+
+    assert response.dense_match_count == 2
+    assert response.sparse_match_count == 0
+    assert len(response.matches) == 2
+
+
+def test_hybrid_search_returns_sparse_only_matches_when_dense_is_filtered(
+    tmp_path: Path,
+) -> None:
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(FakeEmbeddingClient(), store)
+        service.index_text_document(_write_manual(tmp_path))
+
+        response = service.search_hybrid(
+            "tire pressure",
+            limit=1,
+            score_threshold=1.1,
+        )
+
+    assert response.dense_match_count == 0
+    assert response.sparse_match_count == 2
+    assert response.matches[0].section_title == "Tires"
+
+
+def test_hybrid_search_forwards_metadata_filter(tmp_path: Path) -> None:
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(FakeEmbeddingClient(), store)
+        service.index_text_document(_write_manual(tmp_path))
+
+        response = service.search_hybrid(
+            "tire pressure",
+            metadata_filter=ChunkMetadataFilter(section_titles=("Engine",)),
+        )
+
+    assert {match.section_title for match in response.matches} == {"Engine"}
+
+
+def test_hybrid_search_rejects_empty_query() -> None:
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(FakeEmbeddingClient(), store)
+
+        with pytest.raises(ValueError, match="must not be empty"):
+            service.search_hybrid("   ")
+
+
+@pytest.mark.parametrize(
+    ("limit", "candidate_limit", "message"),
+    [
+        (0, 20, "result limit"),
+        (-1, 20, "result limit"),
+        (5, 4, "candidate limit"),
+    ],
+)
+def test_hybrid_search_rejects_invalid_limits(
+    limit: int,
+    candidate_limit: int,
+    message: str,
+) -> None:
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(FakeEmbeddingClient(), store)
+
+        with pytest.raises(ValueError, match=message):
+            service.search_hybrid(
+                "warning",
+                limit=limit,
+                candidate_limit=candidate_limit,
+            )
+
+
+@pytest.mark.parametrize("rrf_k", [0.0, float("nan")])
+def test_hybrid_search_rejects_invalid_rrf_constant(rrf_k: float) -> None:
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(FakeEmbeddingClient(), store)
+
+        with pytest.raises(ValueError, match="reciprocal-rank constant"):
+            service.search_hybrid("warning", rrf_k=rrf_k)
+
+
+@pytest.mark.parametrize(
+    ("weight_name", "weight", "message"),
+    [
+        ("dense", 0.0, "dense hybrid weight"),
+        ("dense", float("nan"), "dense hybrid weight"),
+        ("sparse", 0.0, "sparse hybrid weight"),
+        ("sparse", float("inf"), "sparse hybrid weight"),
+    ],
+)
+def test_hybrid_search_rejects_invalid_weights(
+    weight_name: str,
+    weight: float,
+    message: str,
+) -> None:
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(FakeEmbeddingClient(), store)
+
+        with pytest.raises(ValueError, match=message):
+            if weight_name == "dense":
+                service.search_hybrid("warning", dense_weight=weight)
+            else:
+                service.search_hybrid("warning", sparse_weight=weight)
+
+
+def test_hybrid_search_embedding_failure_is_reported(tmp_path: Path) -> None:
+    client = FakeEmbeddingClient()
+
+    with QdrantChunkStore.in_memory() as store:
+        service = DocumentRetrievalService(client, store)
+        service.index_text_document(_write_manual(tmp_path))
+        client.fail = True
+
+        with pytest.raises(RuntimeError, match="simulated embedding failure"):
+            service.search_hybrid("engine warning")

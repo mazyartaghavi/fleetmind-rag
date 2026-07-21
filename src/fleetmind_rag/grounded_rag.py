@@ -12,8 +12,18 @@ from fleetmind_rag.vector_store import VectorSearchResult
 DEFAULT_GROUNDED_SYSTEM_PROMPT = """You are FleetMind, a cautious
 fleet-operations assistant.
 Answer only from the retrieved evidence supplied in the user prompt.
+Provide a concise and complete answer to the question. Include every directly
+relevant condition, action, exception, prohibition, safety consequence, and
+required follow-up explicitly stated in the evidence.
+Reuse the evidence's exact key wording for safety-critical actions, hazards, time
+limits, and required follow-up; do not weaken or generalize those phrases.
+Do not add or infer any procedure, diagnosis, reporting, escalation, inspection,
+authorization, record-keeping, or advice unless the evidence explicitly states it.
+For a conditional yes-or-no question, do not assume that an unstated adverse
+condition is present. State the evidence-based conditional conclusion, then all
+relevant conditions and required follow-up from the evidence.
 Use the provided source labels as inline citations, such as [S1].
-Never invent maintenance procedures, limits, diagnoses, or citations.
+Every factual claim must be directly supported by a cited source.
 If the evidence is insufficient, reply exactly: INSUFFICIENT_CONTEXT"""
 
 ABSTENTION_ANSWER = (
@@ -22,6 +32,56 @@ ABSTENTION_ANSWER = (
 )
 
 _CITATION_PATTERN = re.compile(r"\[(S\d+)\]")
+_PERMISSION_QUESTION_PATTERN = re.compile(
+    r"^\s*(?:can|may)\b|\b(?:allowed|permitted)\b",
+    re.IGNORECASE,
+)
+_NEGATIVE_PERMISSION_PATTERN = re.compile(
+    r"\b(?:must\s+not|may\s+not|cannot|can't|prohibited|"
+    r"not\s+allowed|not\s+permitted)\b",
+    re.IGNORECASE,
+)
+_POSITIVE_PERMISSION_PATTERN = re.compile(
+    r"\b(?:may|allowed|permitted)\b",
+    re.IGNORECASE,
+)
+_SENTENCE_SPLIT_PATTERN = re.compile(r"(?<=[.!?])\s+")
+_TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
+_QUESTION_STOPWORDS = frozenset(
+    {
+        "a",
+        "after",
+        "an",
+        "and",
+        "are",
+        "be",
+        "can",
+        "could",
+        "do",
+        "does",
+        "for",
+        "from",
+        "how",
+        "if",
+        "in",
+        "is",
+        "it",
+        "may",
+        "must",
+        "of",
+        "on",
+        "or",
+        "should",
+        "the",
+        "to",
+        "what",
+        "when",
+        "which",
+        "while",
+        "with",
+        "would",
+    }
+)
 _INSUFFICIENT_CONTEXT = "INSUFFICIENT_CONTEXT"
 
 
@@ -227,6 +287,27 @@ class GroundedAnswerService:
             )
 
         used_citations = tuple(citation_by_label[label] for label in cited_labels)
+        permission_answer = self._deterministic_permission_answer(
+            question=clean_question,
+            citations=used_citations,
+        )
+
+        if permission_answer is not None:
+            fallback_answer, fallback_citations = permission_answer
+            return GroundedAnswerResult(
+                succeeded=True,
+                abstained=False,
+                question=clean_question,
+                answer=fallback_answer,
+                citations=fallback_citations,
+                retrieval_model=retrieval.embedding_model,
+                generation_model=generation_model,
+                top_score=top_score,
+                message=(
+                    "A deterministic extractive answer was returned for a "
+                    "permission question."
+                ),
+            )
 
         return GroundedAnswerResult(
             succeeded=True,
@@ -327,11 +408,115 @@ class GroundedAnswerService:
     def _build_user_prompt(question: str, context: str) -> str:
         return (
             "Answer the fleet-operations question using only the retrieved evidence.\n"
-            "Cite every supported claim with the exact source labels shown below.\n"
+            "Give a concise and complete answer. Include every directly relevant "
+            "condition, action, exception, prohibition, safety consequence, and "
+            "required follow-up explicitly stated in the evidence.\n"
+            "Reuse the evidence's exact key wording for safety-critical actions, "
+            "hazards, time limits, and required follow-up; do not replace those "
+            "details with weaker or more general wording.\n"
+            "Do not add or infer procedures, diagnoses, reporting, escalation, "
+            "inspection, authorization, record-keeping, or advice unless the "
+            "evidence explicitly states them. Do not create headings for absent "
+            "requirements.\n"
+            "For a conditional yes-or-no question, do not assume that an "
+            "unstated adverse condition is present. State the evidence-based "
+            "conditional conclusion, then all relevant conditions and required "
+            "follow-up from the evidence.\n"
+            "Cite every factual claim with the exact source labels shown below.\n"
             "If the evidence is insufficient, reply exactly: "
             f"{_INSUFFICIENT_CONTEXT}\n\n"
             f"Question:\n{question}\n\n"
             f"Retrieved evidence:\n{context}"
+        )
+
+    @classmethod
+    def _deterministic_permission_answer(
+        cls,
+        *,
+        question: str,
+        citations: tuple[GroundedCitation, ...],
+    ) -> tuple[str, tuple[GroundedCitation, ...]] | None:
+        """Return exact evidence for an unambiguous permission question.
+
+        Permission and prohibition decisions are safety-sensitive and compact enough
+        to answer extractively. Using the most question-relevant evidence sentence
+        avoids a generated answer that weakens a hazard, omits a required follow-up,
+        or reverses a conditional permission.
+        """
+
+        if not _PERMISSION_QUESTION_PATTERN.search(question):
+            return None
+
+        relevant_sentences = cls._most_relevant_evidence_sentences(
+            question=question,
+            citations=citations,
+        )
+        if not relevant_sentences:
+            return None
+
+        has_negative_permission = any(
+            _NEGATIVE_PERMISSION_PATTERN.search(sentence)
+            for sentence, _ in relevant_sentences
+        )
+        has_positive_permission = any(
+            _POSITIVE_PERMISSION_PATTERN.search(sentence)
+            for sentence, _ in relevant_sentences
+        )
+
+        if has_negative_permission == has_positive_permission:
+            return None
+
+        conclusion = (
+            "No." if has_negative_permission else "Yes, under the stated conditions."
+        )
+        fallback_parts = [conclusion]
+        fallback_citations: list[GroundedCitation] = []
+
+        for sentence, citation in relevant_sentences:
+            fallback_parts.append(f"{sentence} [{citation.label}]")
+            if citation not in fallback_citations:
+                fallback_citations.append(citation)
+
+        return " ".join(fallback_parts), tuple(fallback_citations)
+
+    @staticmethod
+    def _most_relevant_evidence_sentences(
+        *,
+        question: str,
+        citations: tuple[GroundedCitation, ...],
+    ) -> tuple[tuple[str, GroundedCitation], ...]:
+        question_tokens = {
+            token
+            for token in _TOKEN_PATTERN.findall(question.lower())
+            if token not in _QUESTION_STOPWORDS
+        }
+
+        if not question_tokens:
+            return ()
+
+        candidates: list[tuple[int, int, str, GroundedCitation]] = []
+        sentence_index = 0
+
+        for citation in citations:
+            for raw_sentence in _SENTENCE_SPLIT_PATTERN.split(citation.text.strip()):
+                sentence = raw_sentence.strip()
+                if not sentence:
+                    continue
+
+                sentence_tokens = set(_TOKEN_PATTERN.findall(sentence.lower()))
+                overlap = len(question_tokens.intersection(sentence_tokens))
+                if overlap > 0:
+                    candidates.append((overlap, sentence_index, sentence, citation))
+                sentence_index += 1
+
+        if not candidates:
+            return ()
+
+        highest_overlap = max(candidate[0] for candidate in candidates)
+        return tuple(
+            (sentence, citation)
+            for overlap, _, sentence, citation in candidates
+            if overlap == highest_overlap
         )
 
     @staticmethod

@@ -343,3 +343,132 @@ def test_non_finite_retrieval_score_raises() -> None:
 
     with pytest.raises(RuntimeError, match="non-finite"):
         service.answer("engine warning")
+
+
+def test_default_system_prompt_requires_complete_exact_grounding() -> None:
+    assert "concise and complete answer" in DEFAULT_GROUNDED_SYSTEM_PROMPT
+    assert "exact key wording" in DEFAULT_GROUNDED_SYSTEM_PROMPT
+    assert "safety consequence" in DEFAULT_GROUNDED_SYSTEM_PROMPT
+    assert "Do not add or infer" in DEFAULT_GROUNDED_SYSTEM_PROMPT
+    assert "unless the evidence explicitly states it" in DEFAULT_GROUNDED_SYSTEM_PROMPT
+
+
+def test_user_prompt_requires_complete_supported_exact_wording() -> None:
+    service, _, chat_client = make_service(
+        make_retrieval_response(
+            make_match(
+                text=(
+                    "The driver may complete the trip and must report the warning "
+                    "before the next dispatch. Pressurized coolant can cause serious "
+                    "burns."
+                )
+            )
+        )
+    )
+
+    service.answer(
+        "Can the driver complete the current trip after a yellow battery warning?"
+    )
+
+    prompt = chat_client.prompts[0]
+    assert "concise and complete answer" in prompt
+    assert "exact key wording" in prompt
+    assert "Do not add or infer" in prompt
+    assert "Do not create headings for absent requirements" in prompt
+    assert "conditional yes-or-no question" in prompt
+    assert "do not assume" in prompt
+    assert "must report the warning before the next dispatch" in prompt
+    assert "serious burns" in prompt
+
+
+def test_negative_permission_conclusion_is_replaced_with_extractive_evidence() -> None:
+    evidence = (
+        "A yellow battery warning indicates that the charging system may require "
+        "inspection. When no smoke, burning smell, or loss of electrical power is "
+        "present, the driver may complete the current trip and report the warning "
+        "before the next dispatch. If the warning is accompanied by smoke, the "
+        "driver must stop safely."
+    )
+    service, _, _ = make_service(
+        make_retrieval_response(make_match(text=evidence)),
+        make_chat_result(
+            "No. The driver must stop safely and switch off the vehicle [S1]."
+        ),
+    )
+
+    result = service.answer(
+        "Can the driver complete the current trip after a yellow battery warning?"
+    )
+
+    assert result.succeeded
+    assert not result.abstained
+    assert result.answer is not None
+    assert "may complete the current trip" in result.answer
+    assert "report the warning before the next dispatch" in result.answer
+    assert "The driver must stop safely" not in result.answer
+    assert tuple(citation.label for citation in result.citations) == ("S1",)
+    assert "deterministic extractive" in result.message
+
+
+def test_positive_permission_conclusion_is_replaced_for_prohibited_action() -> None:
+    evidence = (
+        "Opening the coolant reservoir while the engine is hot is prohibited "
+        "because pressurized coolant can cause serious burns."
+    )
+    service, _, _ = make_service(
+        make_retrieval_response(make_match(text=evidence)),
+        make_chat_result("Yes. The driver may open the reservoir carefully [S1]."),
+    )
+
+    result = service.answer(
+        "May the driver open the coolant reservoir while the engine is hot?"
+    )
+
+    assert result.answer is not None
+    assert "prohibited" in result.answer
+    assert "serious burns" in result.answer
+    assert "may open the reservoir carefully" not in result.answer
+    assert "deterministic extractive" in result.message
+
+
+def test_supported_permission_uses_deterministic_evidence() -> None:
+    evidence = (
+        "Opening the coolant reservoir while the engine is hot is prohibited "
+        "because pressurized coolant can cause serious burns."
+    )
+    service, _, _ = make_service(
+        make_retrieval_response(make_match(text=evidence)),
+        make_chat_result(
+            "No. Opening the coolant reservoir while the engine is hot is "
+            "prohibited because pressurized coolant can cause serious burns [S1]."
+        ),
+    )
+
+    result = service.answer(
+        "May the driver open the coolant reservoir while the engine is hot?"
+    )
+
+    assert result.answer == f"No. {evidence} [S1]"
+    assert "deterministic extractive" in result.message
+
+
+def test_permission_answer_restores_omitted_safety_consequence() -> None:
+    evidence = (
+        "Opening the coolant reservoir while the engine is hot is prohibited "
+        "because pressurized coolant can cause serious burns."
+    )
+    service, _, _ = make_service(
+        make_retrieval_response(make_match(text=evidence)),
+        make_chat_result(
+            "Opening the coolant reservoir while the engine is hot is prohibited [S1]."
+        ),
+    )
+
+    result = service.answer(
+        "May the driver open the coolant reservoir while the engine is hot?"
+    )
+
+    assert result.answer == f"No. {evidence} [S1]"
+    assert result.answer is not None
+    assert "serious burns" in result.answer
+    assert "deterministic extractive" in result.message

@@ -1,0 +1,50 @@
+[
+  {
+    "case_id": "red-temperature-action",
+    "query": "red engine-temperature warning overheating stop vehicle",
+    "expected_section": "Red Engine-Temperature Warning",
+    "expected_rank_at_most": 4
+  },
+  {
+    "case_id": "hot-coolant-hazard",
+    "query": "coolant reservoir hot pressurized serious burns",
+    "expected_section": "Red Engine-Temperature Warning",
+    "expected_rank_at_most": 4
+  },
+  {
+    "case_id": "yellow-battery-inspection",
+    "query": "yellow battery warning charging system inspection",
+    "expected_section": "Yellow Battery Warning",
+    "expected_rank_at_most": 4
+  },
+  {
+    "case_id": "yellow-battery-danger",
+    "query": "smoke burning smell dimming lights electrical failures",
+    "expected_section": "Yellow Battery Warning",
+    "expected_rank_at_most": 4
+  },
+  {
+    "case_id": "unsafe-tire-defects",
+    "query": "tire exposed reinforcement sidewall bulge deep cut",
+    "expected_section": "Tire Inspection",
+    "expected_rank_at_most": 4
+  },
+  {
+    "case_id": "tire-defect-reporting",
+    "query": "tire defect vehicle inspection report notify fleet supervisor",
+    "expected_section": "Tire Inspection",
+    "expected_rank_at_most": 4
+  },
+  {
+    "case_id": "maintenance-report-fields",
+    "query": "vehicle identifier warning defect approximate time current location action already taken",
+    "expected_section": "Maintenance Reporting",
+    "expected_rank_at_most": 4
+  },
+  {
+    "case_id": "critical-warning-channel",
+    "query": "safety-critical warnings reported immediately telephone approved fleet-maintenance system",
+    "expected_section": "Maintenance Reporting",
+    "expected_rank_at_most": 4
+  }
+]

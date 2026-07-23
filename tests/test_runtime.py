@@ -39,6 +39,13 @@ class _FakeGroundedAnswerService:
     max_context_chars: int
 
 
+@dataclass
+class _FakeAdaptiveGroundedAnswerService:
+    retrieval_service: _FakeRetrievalService
+    chat_client: Any
+    max_context_chars: int
+
+
 class _FakeEmbeddingClient:
     def __init__(
         self,
@@ -54,6 +61,22 @@ class _FakeEmbeddingClient:
 
 class _FakeChatClient(_FakeEmbeddingClient):
     pass
+
+
+def _build_fake_runtime(
+    settings: FleetMindSettings,
+    store: _FakeVectorStore,
+    retrieval: _FakeRetrievalService,
+    grounded: _FakeGroundedAnswerService,
+    adaptive: _FakeAdaptiveGroundedAnswerService,
+) -> FleetMindRAGRuntime:
+    return FleetMindRAGRuntime(
+        settings,
+        cast(Any, store),
+        cast(Any, retrieval),
+        cast(Any, grounded),
+        cast(Any, adaptive),
+    )
 
 
 def test_runtime_builds_configured_service_graph(
@@ -105,6 +128,23 @@ def test_runtime_builds_configured_service_graph(
         _build_grounded_service,
     )
 
+    def _build_adaptive_service(
+        retrieval_service: _FakeRetrievalService,
+        chat_client: _FakeChatClient,
+        *,
+        max_context_chars: int,
+    ) -> _FakeAdaptiveGroundedAnswerService:
+        return _FakeAdaptiveGroundedAnswerService(
+            retrieval_service,
+            chat_client,
+            max_context_chars,
+        )
+
+    monkeypatch.setattr(
+        "fleetmind_rag.runtime.AdaptiveGroundedAnswerService",
+        _build_adaptive_service,
+    )
+
     runtime = FleetMindRAGRuntime.from_settings(settings)
 
     assert runtime.settings is settings
@@ -118,6 +158,10 @@ def test_runtime_builds_configured_service_graph(
         _FakeGroundedAnswerService,
         cast(object, runtime.grounded_answer_service),
     )
+    adaptive_service = cast(
+        _FakeAdaptiveGroundedAnswerService,
+        cast(object, runtime.adaptive_grounded_answer_service),
+    )
 
     assert retrieval_service.embedding_client.base_url == "http://localhost:11434/"
     assert retrieval_service.embedding_client.model == "embeddinggemma"
@@ -125,6 +169,9 @@ def test_runtime_builds_configured_service_graph(
     assert grounded_service.chat_client.model == "llama3.2:3b"
     assert grounded_service.minimum_score == 0.61
     assert grounded_service.max_context_chars == 4096
+    assert adaptive_service.retrieval_service is retrieval_service
+    assert adaptive_service.chat_client is grounded_service.chat_client
+    assert adaptive_service.max_context_chars == 4096
 
 
 def test_runtime_context_manager_closes_store() -> None:
@@ -132,7 +179,8 @@ def test_runtime_context_manager_closes_store() -> None:
     store = _FakeVectorStore(Path("data/qdrant_local"), "fleetmind_documents")
     retrieval = _FakeRetrievalService(object(), store)
     grounded = _FakeGroundedAnswerService(retrieval, object(), 0.5, 6000)
-    runtime = FleetMindRAGRuntime(settings, store, retrieval, grounded)  # type: ignore[arg-type]
+    adaptive = _FakeAdaptiveGroundedAnswerService(retrieval, object(), 6000)
+    runtime = _build_fake_runtime(settings, store, retrieval, grounded, adaptive)
 
     with runtime:
         assert runtime.settings is settings
@@ -146,7 +194,8 @@ def test_runtime_close_is_idempotent() -> None:
     store = _FakeVectorStore(Path("data/qdrant_local"), "fleetmind_documents")
     retrieval = _FakeRetrievalService(object(), store)
     grounded = _FakeGroundedAnswerService(retrieval, object(), 0.5, 6000)
-    runtime = FleetMindRAGRuntime(settings, store, retrieval, grounded)  # type: ignore[arg-type]
+    adaptive = _FakeAdaptiveGroundedAnswerService(retrieval, object(), 6000)
+    runtime = _build_fake_runtime(settings, store, retrieval, grounded, adaptive)
 
     runtime.close()
     runtime.close()
@@ -160,7 +209,8 @@ def test_closed_runtime_cannot_be_reentered() -> None:
     store = _FakeVectorStore(Path("data/qdrant_local"), "fleetmind_documents")
     retrieval = _FakeRetrievalService(object(), store)
     grounded = _FakeGroundedAnswerService(retrieval, object(), 0.5, 6000)
-    runtime = FleetMindRAGRuntime(settings, store, retrieval, grounded)  # type: ignore[arg-type]
+    adaptive = _FakeAdaptiveGroundedAnswerService(retrieval, object(), 6000)
+    runtime = _build_fake_runtime(settings, store, retrieval, grounded, adaptive)
     runtime.close()
 
     with pytest.raises(RuntimeError, match="closed"):

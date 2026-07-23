@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from types import TracebackType
 
+from fleetmind_rag.adaptive_grounded_rag import AdaptiveGroundedAnswerService
 from fleetmind_rag.config import FleetMindSettings
 from fleetmind_rag.grounded_rag import GroundedAnswerService
 from fleetmind_rag.ollama import OllamaChatClient, OllamaEmbeddingClient
@@ -18,6 +19,7 @@ class FleetMindRAGRuntime:
     vector_store: QdrantChunkStore
     retrieval_service: DocumentRetrievalService
     grounded_answer_service: GroundedAnswerService
+    adaptive_grounded_answer_service: AdaptiveGroundedAnswerService
     _closed: bool = field(default=False, init=False, repr=False)
 
     @classmethod
@@ -51,6 +53,11 @@ class FleetMindRAGRuntime:
                 minimum_score=settings.minimum_grounding_score,
                 max_context_chars=settings.max_context_chars,
             )
+            adaptive_grounded_answer_service = AdaptiveGroundedAnswerService(
+                retrieval_service,
+                chat_client,
+                max_context_chars=settings.max_context_chars,
+            )
         except Exception:
             vector_store.close()
             raise
@@ -60,6 +67,7 @@ class FleetMindRAGRuntime:
             vector_store=vector_store,
             retrieval_service=retrieval_service,
             grounded_answer_service=grounded_answer_service,
+            adaptive_grounded_answer_service=adaptive_grounded_answer_service,
         )
 
     @property

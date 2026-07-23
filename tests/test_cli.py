@@ -3,12 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
+from typing import Any
 
 import pytest
 from pydantic_settings import SettingsConfigDict
 
 from fleetmind_rag.app import (
     DEFAULT_SYSTEM_PROMPT,
+    build_adaptive_grounded_answer_message,
     build_system_prompt,
     main,
     run_ask,
@@ -185,9 +187,20 @@ class _FakeGroundedService:
 
 
 @dataclass
+class _FakeAdaptiveGroundedService:
+    result: Any
+    calls: list[tuple[str, Any]]
+
+    def answer(self, question: str, *, config: Any) -> Any:
+        self.calls.append((question, config))
+        return self.result
+
+
+@dataclass
 class _FakeRuntime:
     retrieval_service: _FakeRetrievalService
     grounded_answer_service: _FakeGroundedService
+    adaptive_grounded_answer_service: _FakeAdaptiveGroundedService
     closed: bool = False
 
     def __enter__(self) -> _FakeRuntime:
@@ -248,13 +261,78 @@ def _grounded_result(*, abstained: bool = False) -> GroundedAnswerResult:
     )
 
 
+def _adaptive_result(
+    grounded_result: GroundedAnswerResult,
+    *,
+    status: str = "completed",
+    attempts: int = 2,
+    rewrites: int = 1,
+    initial_strategy: str = "dense",
+    final_strategy: str | None = "hybrid",
+    feedback_observations: int = 2,
+) -> Any:
+    resolved_status = status
+    resolved_rewrites = tuple(object() for _ in range(rewrites))
+    resolved_observations = tuple(object() for _ in range(feedback_observations))
+
+    class _Decision:
+        strategy = final_strategy
+
+    class _LatestResult:
+        decision = _Decision()
+
+    class _State:
+        status = resolved_status
+        latest_result = None if final_strategy is None else _LatestResult()
+
+    class _Outcome:
+        state = _State()
+        rewrites = resolved_rewrites
+
+    class _InitialRouting:
+        strategy = initial_strategy
+
+    class _FeedbackHistory:
+        observations = resolved_observations
+
+    class _Result:
+        grounded_answer = grounded_result
+        retrieval_outcome = _Outcome()
+        initial_routing = _InitialRouting()
+        feedback_history = _FeedbackHistory()
+        attempt_count = attempts
+
+    return _Result()
+
+
+def _fake_runtime(
+    *,
+    grounded_result: GroundedAnswerResult | None = None,
+    adaptive_result: Any | None = None,
+) -> _FakeRuntime:
+    resolved_grounded = grounded_result or _grounded_result()
+    resolved_adaptive = adaptive_result or _adaptive_result(resolved_grounded)
+    return _FakeRuntime(
+        _FakeRetrievalService(_index_result(), []),
+        _FakeGroundedService(resolved_grounded, []),
+        _FakeAdaptiveGroundedService(resolved_adaptive, []),
+    )
+
+
 def test_run_index_uses_configured_defaults_and_prints_summary(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     settings = _TestFleetMindSettings()
     retrieval = _FakeRetrievalService(_index_result(), [])
-    runtime = _FakeRuntime(retrieval, _FakeGroundedService(_grounded_result(), []))
+    runtime = _FakeRuntime(
+        retrieval,
+        _FakeGroundedService(_grounded_result(), []),
+        _FakeAdaptiveGroundedService(
+            _adaptive_result(_grounded_result()),
+            [],
+        ),
+    )
     monkeypatch.setattr(
         "fleetmind_rag.app.create_rag_runtime", lambda settings: runtime
     )
@@ -277,7 +355,14 @@ def test_index_command_forwards_overrides(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     retrieval = _FakeRetrievalService(_index_result(), [])
-    runtime = _FakeRuntime(retrieval, _FakeGroundedService(_grounded_result(), []))
+    runtime = _FakeRuntime(
+        retrieval,
+        _FakeGroundedService(_grounded_result(), []),
+        _FakeAdaptiveGroundedService(
+            _adaptive_result(_grounded_result()),
+            [],
+        ),
+    )
     monkeypatch.setattr(
         "fleetmind_rag.app.create_rag_runtime", lambda settings: runtime
     )
@@ -328,7 +413,8 @@ def test_run_ask_prints_answer_and_sources(
 ) -> None:
     settings = _TestFleetMindSettings()
     grounded = _FakeGroundedService(_grounded_result(), [])
-    runtime = _FakeRuntime(_FakeRetrievalService(_index_result(), []), grounded)
+    runtime = _fake_runtime()
+    grounded = runtime.grounded_answer_service
     monkeypatch.setattr(
         "fleetmind_rag.app.create_rag_runtime", lambda settings: runtime
     )
@@ -352,7 +438,8 @@ def test_ask_command_prints_safe_abstention(
 ) -> None:
     monkeypatch.chdir(tmp_path)
     grounded = _FakeGroundedService(_grounded_result(abstained=True), [])
-    runtime = _FakeRuntime(_FakeRetrievalService(_index_result(), []), grounded)
+    runtime = _fake_runtime(grounded_result=grounded.result)
+    grounded = runtime.grounded_answer_service
     monkeypatch.setattr(
         "fleetmind_rag.app.create_rag_runtime", lambda settings: runtime
     )
@@ -383,8 +470,7 @@ def test_run_ask_reports_unsuccessful_result(
         top_score=0.9,
         message="generation failed",
     )
-    grounded = _FakeGroundedService(failed_result, [])
-    runtime = _FakeRuntime(_FakeRetrievalService(_index_result(), []), grounded)
+    runtime = _fake_runtime(grounded_result=failed_result)
     monkeypatch.setattr(
         "fleetmind_rag.app.create_rag_runtime", lambda settings: runtime
     )
@@ -397,6 +483,136 @@ def test_run_ask_reports_unsuccessful_result(
     assert captured.err == "FleetMind grounded answer failed: generation failed\n"
 
 
+def test_build_adaptive_grounded_answer_message_includes_trace() -> None:
+    result = _adaptive_result(_grounded_result())
+
+    message = build_adaptive_grounded_answer_message(result)
+
+    assert "Stop the vehicle safely [S1]." in message
+    assert "Adaptive retrieval:" in message
+    assert "Status: completed" in message
+    assert "Attempts: 2" in message
+    assert "Rewrites: 1" in message
+    assert "Initial strategy: dense" in message
+    assert "Final strategy: hybrid" in message
+    assert "Feedback observations: 2" in message
+
+
+def test_run_ask_uses_adaptive_service_and_prints_trace(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    settings = _TestFleetMindSettings()
+    runtime = _fake_runtime()
+    monkeypatch.setattr(
+        "fleetmind_rag.app.create_rag_runtime", lambda settings: runtime
+    )
+
+    exit_code = run_ask(
+        settings,
+        "What should I do?",
+        limit=7,
+        adaptive=True,
+        max_attempts=4,
+        candidate_limit=30,
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert runtime.grounded_answer_service.calls == []
+    assert len(runtime.adaptive_grounded_answer_service.calls) == 1
+    question, config = runtime.adaptive_grounded_answer_service.calls[0]
+    assert question == "What should I do?"
+    assert config.max_attempts == 4
+    assert config.limit == 7
+    assert config.candidate_limit == 30
+    assert "Adaptive retrieval:" in captured.out
+    assert captured.err == ""
+    assert runtime.closed
+
+
+def test_adaptive_ask_uses_safe_candidate_limit_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = _TestFleetMindSettings()
+    runtime = _fake_runtime()
+    monkeypatch.setattr(
+        "fleetmind_rag.app.create_rag_runtime", lambda settings: runtime
+    )
+
+    exit_code = run_ask(
+        settings,
+        "What should I do?",
+        limit=25,
+        adaptive=True,
+    )
+
+    assert exit_code == 0
+    _, config = runtime.adaptive_grounded_answer_service.calls[0]
+    assert config.limit == 25
+    assert config.candidate_limit == 25
+
+
+def test_adaptive_ask_rejects_invalid_retry_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    settings = _TestFleetMindSettings()
+    runtime = _fake_runtime()
+    monkeypatch.setattr(
+        "fleetmind_rag.app.create_rag_runtime", lambda settings: runtime
+    )
+
+    exit_code = run_ask(
+        settings,
+        "What should I do?",
+        adaptive=True,
+        max_attempts=0,
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert runtime.adaptive_grounded_answer_service.calls == []
+    assert captured.out == ""
+    assert "max_attempts must be greater than zero" in captured.err
+    assert runtime.closed
+
+
+def test_adaptive_ask_command_forwards_cli_controls(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    runtime = _fake_runtime()
+    monkeypatch.setattr(
+        "fleetmind_rag.app.create_rag_runtime", lambda settings: runtime
+    )
+
+    exit_code = main(
+        [
+            "ask",
+            "What should I do?",
+            "--adaptive",
+            "--limit",
+            "6",
+            "--max-attempts",
+            "4",
+            "--candidate-limit",
+            "24",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    _, config = runtime.adaptive_grounded_answer_service.calls[0]
+    assert config.limit == 6
+    assert config.max_attempts == 4
+    assert config.candidate_limit == 24
+    assert "Adaptive retrieval:" in captured.out
+    assert captured.err == ""
+
+
 def test_cli_parser_lists_rag_commands(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as error:
         main(["--help"])
@@ -406,4 +622,19 @@ def test_cli_parser_lists_rag_commands(capsys: pytest.CaptureFixture[str]) -> No
     assert error.value.code == 0
     assert "{chat,index,ask}" in captured.out
     assert "citation-grounded" in captured.out
+    assert captured.err == ""
+
+
+def test_ask_help_lists_adaptive_controls(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as error:
+        main(["ask", "--help"])
+
+    captured = capsys.readouterr()
+
+    assert error.value.code == 0
+    assert "--adaptive" in captured.out
+    assert "--max-attempts" in captured.out
+    assert "--candidate-limit" in captured.out
     assert captured.err == ""

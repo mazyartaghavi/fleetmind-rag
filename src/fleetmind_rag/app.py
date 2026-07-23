@@ -6,6 +6,8 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import cast
 
+from fleetmind_rag.adaptive_grounded_rag import AdaptiveGroundedAnswerResult
+from fleetmind_rag.adaptive_retrieval import AdaptiveRetrievalConfig
 from fleetmind_rag.config import FleetMindSettings
 from fleetmind_rag.grounded_rag import GroundedAnswerResult
 from fleetmind_rag.ollama import (
@@ -125,6 +127,30 @@ def build_grounded_answer_message(result: GroundedAnswerResult) -> str:
     return "\n".join(lines)
 
 
+def build_adaptive_grounded_answer_message(
+    result: AdaptiveGroundedAnswerResult,
+) -> str:
+    """Build grounded output plus a concise adaptive-retrieval trace."""
+
+    outcome = result.retrieval_outcome
+    latest_result = outcome.state.latest_result
+    final_strategy = (
+        "none" if latest_result is None else latest_result.decision.strategy
+    )
+    lines = [
+        build_grounded_answer_message(result.grounded_answer),
+        "",
+        "Adaptive retrieval:",
+        f"Status: {outcome.state.status}",
+        f"Attempts: {result.attempt_count}",
+        f"Rewrites: {len(outcome.rewrites)}",
+        f"Initial strategy: {result.initial_routing.strategy}",
+        f"Final strategy: {final_strategy}",
+        f"Feedback observations: {len(result.feedback_history.observations)}",
+    ]
+    return "\n".join(lines)
+
+
 def build_cli_parser() -> argparse.ArgumentParser:
     """Build the FleetMind-RAG command-line argument parser."""
 
@@ -194,6 +220,29 @@ def build_cli_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Maximum retrieved chunks; defaults to the configured value.",
+    )
+    ask_parser.add_argument(
+        "--adaptive",
+        action="store_true",
+        help=(
+            "Use feedback-aware routing, quality checking, and bounded "
+            "query-rewrite retries."
+        ),
+    )
+    ask_parser.add_argument(
+        "--max-attempts",
+        type=int,
+        default=3,
+        help="Maximum adaptive retrieval attempts; used with --adaptive.",
+    )
+    ask_parser.add_argument(
+        "--candidate-limit",
+        type=int,
+        default=None,
+        help=(
+            "Adaptive hybrid candidate pool; defaults to at least 20 and "
+            "never less than --limit."
+        ),
     )
 
     return parser
@@ -306,17 +355,35 @@ def run_ask(
     question: str,
     *,
     limit: int | None = None,
+    adaptive: bool = False,
+    max_attempts: int = 3,
+    candidate_limit: int | None = None,
 ) -> int:
     """Answer one question from the configured indexed fleet documents."""
 
     effective_limit = settings.retrieval_limit if limit is None else limit
+    effective_candidate_limit = (
+        max(20, effective_limit) if candidate_limit is None else candidate_limit
+    )
+    adaptive_result: AdaptiveGroundedAnswerResult | None = None
 
     try:
         with create_rag_runtime(settings) as runtime:
-            result = runtime.grounded_answer_service.answer(
-                question,
-                limit=effective_limit,
-            )
+            if adaptive:
+                adaptive_result = runtime.adaptive_grounded_answer_service.answer(
+                    question,
+                    config=AdaptiveRetrievalConfig(
+                        max_attempts=max_attempts,
+                        limit=effective_limit,
+                        candidate_limit=effective_candidate_limit,
+                    ),
+                )
+                result = adaptive_result.grounded_answer
+            else:
+                result = runtime.grounded_answer_service.answer(
+                    question,
+                    limit=effective_limit,
+                )
     except (OSError, ValueError, RuntimeError) as error:
         print(f"FleetMind grounded answer failed: {error}", file=sys.stderr)
         return 1
@@ -325,7 +392,11 @@ def run_ask(
         print(f"FleetMind grounded answer failed: {result.message}", file=sys.stderr)
         return 1
 
-    print(build_grounded_answer_message(result))
+    if adaptive_result is None:
+        print(build_grounded_answer_message(result))
+    else:
+        print(build_adaptive_grounded_answer_message(adaptive_result))
+
     return 0
 
 
@@ -358,6 +429,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             settings,
             cast(str, args.question),
             limit=cast(int | None, args.limit),
+            adaptive=cast(bool, args.adaptive),
+            max_attempts=cast(int, args.max_attempts),
+            candidate_limit=cast(int | None, args.candidate_limit),
         )
 
     return run_status(settings)

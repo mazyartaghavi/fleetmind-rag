@@ -1323,10 +1323,11 @@ def test_feedback_gate_command_outputs_json_and_forwards_controls(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    feedback_path = Path("evaluation/data/routing_feedback_ci.json")
 
     class _FakeStore:
         def __init__(self, path: Path) -> None:
-            assert path == Path("data/qdrant_local/routing_feedback.json")
+            assert path == feedback_path
 
         def load(self) -> FeedbackStoreSnapshot:
             return FeedbackStoreSnapshot(
@@ -1348,6 +1349,8 @@ def test_feedback_gate_command_outputs_json_and_forwards_controls(
             "0.10",
             "--minimum-strategy-observations",
             "1",
+            "--feedback-path",
+            str(feedback_path),
             "--format",
             "json",
             "--fail-on",
@@ -1395,6 +1398,7 @@ def test_feedback_gate_help_lists_automation_controls(
     assert "--window-size" in captured.out
     assert "--minimum-change" in captured.out
     assert "--minimum-strategy-observations" in captured.out
+    assert "--feedback-path FEEDBACK_PATH" in captured.out
     assert "--format {text,json}" in captured.out
     assert "--fail-on {warn,fail,never}" in captured.out
     assert captured.err == ""

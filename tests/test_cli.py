@@ -17,6 +17,11 @@ from fleetmind_rag.app import (
     run_index,
 )
 from fleetmind_rag.config import FleetMindSettings
+from fleetmind_rag.feedback_routing import (
+    RoutingFeedbackHistory,
+    RoutingFeedbackObservation,
+)
+from fleetmind_rag.feedback_store import FeedbackStoreSnapshot
 from fleetmind_rag.grounded_rag import (
     GroundedAnswerResult,
     GroundedCitation,
@@ -201,6 +206,9 @@ class _FakeRuntime:
     retrieval_service: _FakeRetrievalService
     grounded_answer_service: _FakeGroundedService
     adaptive_grounded_answer_service: _FakeAdaptiveGroundedService
+    persisted_histories: list[RoutingFeedbackHistory]
+    feedback_revision: int = 0
+    persist_error: RuntimeError | None = None
     closed: bool = False
 
     def __enter__(self) -> _FakeRuntime:
@@ -214,6 +222,20 @@ class _FakeRuntime:
     ) -> None:
         del exc_type, exc_value, traceback
         self.closed = True
+
+    def persist_feedback(
+        self,
+        history: RoutingFeedbackHistory,
+    ) -> FeedbackStoreSnapshot:
+        if self.persist_error is not None:
+            raise self.persist_error
+
+        self.persisted_histories.append(history)
+        self.feedback_revision += 1
+        return FeedbackStoreSnapshot(
+            history=history,
+            revision=self.feedback_revision,
+        )
 
 
 def _index_result() -> DocumentIndexResult:
@@ -273,7 +295,17 @@ def _adaptive_result(
 ) -> Any:
     resolved_status = status
     resolved_rewrites = tuple(object() for _ in range(rewrites))
-    resolved_observations = tuple(object() for _ in range(feedback_observations))
+    resolved_observations = tuple(
+        RoutingFeedbackObservation(
+            query=f"feedback query {index}",
+            strategy="dense",
+            verdict="accept",
+            quality_score=1.0,
+            attempt_number=index + 1,
+            features=("general",),
+        )
+        for index in range(feedback_observations)
+    )
 
     class _Decision:
         strategy = final_strategy
@@ -292,14 +324,11 @@ def _adaptive_result(
     class _InitialRouting:
         strategy = initial_strategy
 
-    class _FeedbackHistory:
-        observations = resolved_observations
-
     class _Result:
         grounded_answer = grounded_result
         retrieval_outcome = _Outcome()
         initial_routing = _InitialRouting()
-        feedback_history = _FeedbackHistory()
+        feedback_history = RoutingFeedbackHistory(resolved_observations)
         attempt_count = attempts
 
     return _Result()
@@ -316,6 +345,7 @@ def _fake_runtime(
         _FakeRetrievalService(_index_result(), []),
         _FakeGroundedService(resolved_grounded, []),
         _FakeAdaptiveGroundedService(resolved_adaptive, []),
+        [],
     )
 
 
@@ -332,6 +362,7 @@ def test_run_index_uses_configured_defaults_and_prints_summary(
             _adaptive_result(_grounded_result()),
             [],
         ),
+        [],
     )
     monkeypatch.setattr(
         "fleetmind_rag.app.create_rag_runtime", lambda settings: runtime
@@ -362,6 +393,7 @@ def test_index_command_forwards_overrides(
             _adaptive_result(_grounded_result()),
             [],
         ),
+        [],
     )
     monkeypatch.setattr(
         "fleetmind_rag.app.create_rag_runtime", lambda settings: runtime
@@ -526,7 +558,11 @@ def test_run_ask_uses_adaptive_service_and_prints_trace(
     assert config.max_attempts == 4
     assert config.limit == 7
     assert config.candidate_limit == 30
+    assert runtime.persisted_histories == [
+        runtime.adaptive_grounded_answer_service.result.feedback_history
+    ]
     assert "Adaptive retrieval:" in captured.out
+    assert "Feedback revision: 1" in captured.out
     assert captured.err == ""
     assert runtime.closed
 
@@ -610,7 +646,50 @@ def test_adaptive_ask_command_forwards_cli_controls(
     assert config.max_attempts == 4
     assert config.candidate_limit == 24
     assert "Adaptive retrieval:" in captured.out
+    assert "Feedback revision: 1" in captured.out
     assert captured.err == ""
+
+
+def test_legacy_ask_does_not_persist_feedback(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    settings = _TestFleetMindSettings()
+    runtime = _fake_runtime()
+    monkeypatch.setattr(
+        "fleetmind_rag.app.create_rag_runtime", lambda settings: runtime
+    )
+
+    exit_code = run_ask(settings, "What should I do?")
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert runtime.persisted_histories == []
+    assert "Feedback revision:" not in captured.out
+
+
+def test_adaptive_ask_reports_feedback_persistence_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    settings = _TestFleetMindSettings()
+    runtime = _fake_runtime()
+    runtime.persist_error = RuntimeError("feedback revision conflict")
+    monkeypatch.setattr(
+        "fleetmind_rag.app.create_rag_runtime", lambda settings: runtime
+    )
+
+    exit_code = run_ask(
+        settings,
+        "What should I do?",
+        adaptive=True,
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert captured.out == ""
+    assert "feedback revision conflict" in captured.err
+    assert runtime.closed
 
 
 def test_cli_parser_lists_rag_commands(capsys: pytest.CaptureFixture[str]) -> None:

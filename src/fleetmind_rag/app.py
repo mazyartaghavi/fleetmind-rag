@@ -129,6 +129,8 @@ def build_grounded_answer_message(result: GroundedAnswerResult) -> str:
 
 def build_adaptive_grounded_answer_message(
     result: AdaptiveGroundedAnswerResult,
+    *,
+    feedback_revision: int | None = None,
 ) -> str:
     """Build grounded output plus a concise adaptive-retrieval trace."""
 
@@ -148,6 +150,10 @@ def build_adaptive_grounded_answer_message(
         f"Final strategy: {final_strategy}",
         f"Feedback observations: {len(result.feedback_history.observations)}",
     ]
+
+    if feedback_revision is not None:
+        lines.append(f"Feedback revision: {feedback_revision}")
+
     return "\n".join(lines)
 
 
@@ -366,6 +372,7 @@ def run_ask(
         max(20, effective_limit) if candidate_limit is None else candidate_limit
     )
     adaptive_result: AdaptiveGroundedAnswerResult | None = None
+    feedback_revision: int | None = None
 
     try:
         with create_rag_runtime(settings) as runtime:
@@ -378,6 +385,10 @@ def run_ask(
                         candidate_limit=effective_candidate_limit,
                     ),
                 )
+                feedback_snapshot = runtime.persist_feedback(
+                    adaptive_result.feedback_history
+                )
+                feedback_revision = feedback_snapshot.revision
                 result = adaptive_result.grounded_answer
             else:
                 result = runtime.grounded_answer_service.answer(
@@ -395,7 +406,12 @@ def run_ask(
     if adaptive_result is None:
         print(build_grounded_answer_message(result))
     else:
-        print(build_adaptive_grounded_answer_message(adaptive_result))
+        print(
+            build_adaptive_grounded_answer_message(
+                adaptive_result,
+                feedback_revision=feedback_revision,
+            )
+        )
 
     return 0
 

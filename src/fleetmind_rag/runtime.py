@@ -5,10 +5,17 @@ from types import TracebackType
 
 from fleetmind_rag.adaptive_grounded_rag import AdaptiveGroundedAnswerService
 from fleetmind_rag.config import FleetMindSettings
+from fleetmind_rag.feedback_routing import RoutingFeedbackHistory
+from fleetmind_rag.feedback_store import (
+    FeedbackStoreSnapshot,
+    JsonRoutingFeedbackStore,
+)
 from fleetmind_rag.grounded_rag import GroundedAnswerService
 from fleetmind_rag.ollama import OllamaChatClient, OllamaEmbeddingClient
 from fleetmind_rag.retrieval import DocumentRetrievalService
 from fleetmind_rag.vector_store import QdrantChunkStore
+
+ROUTING_FEEDBACK_FILENAME = "routing_feedback.json"
 
 
 @dataclass(slots=True)
@@ -20,6 +27,8 @@ class FleetMindRAGRuntime:
     retrieval_service: DocumentRetrievalService
     grounded_answer_service: GroundedAnswerService
     adaptive_grounded_answer_service: AdaptiveGroundedAnswerService
+    feedback_store: JsonRoutingFeedbackStore
+    feedback_snapshot: FeedbackStoreSnapshot
     _closed: bool = field(default=False, init=False, repr=False)
 
     @classmethod
@@ -31,8 +40,12 @@ class FleetMindRAGRuntime:
             settings.qdrant_path,
             collection_name=settings.qdrant_collection,
         )
+        feedback_store = JsonRoutingFeedbackStore(
+            settings.qdrant_path / ROUTING_FEEDBACK_FILENAME
+        )
 
         try:
+            feedback_snapshot = feedback_store.load()
             embedding_client = OllamaEmbeddingClient(
                 base_url,
                 settings.embedding_model,
@@ -56,6 +69,7 @@ class FleetMindRAGRuntime:
             adaptive_grounded_answer_service = AdaptiveGroundedAnswerService(
                 retrieval_service,
                 chat_client,
+                history=feedback_snapshot.history,
                 max_context_chars=settings.max_context_chars,
             )
         except Exception:
@@ -68,6 +82,8 @@ class FleetMindRAGRuntime:
             retrieval_service=retrieval_service,
             grounded_answer_service=grounded_answer_service,
             adaptive_grounded_answer_service=adaptive_grounded_answer_service,
+            feedback_store=feedback_store,
+            feedback_snapshot=feedback_snapshot,
         )
 
     @property
@@ -75,6 +91,22 @@ class FleetMindRAGRuntime:
         """Return whether the runtime has released its owned resources."""
 
         return self._closed
+
+    def persist_feedback(
+        self,
+        history: RoutingFeedbackHistory,
+    ) -> FeedbackStoreSnapshot:
+        """Persist updated routing history using the loaded revision."""
+
+        if self._closed:
+            raise RuntimeError("The FleetMind RAG runtime is closed.")
+
+        snapshot = self.feedback_store.save(
+            history,
+            expected_revision=self.feedback_snapshot.revision,
+        )
+        self.feedback_snapshot = snapshot
+        return snapshot
 
     def close(self) -> None:
         """Release the owned Qdrant client exactly once."""

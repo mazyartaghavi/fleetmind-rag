@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
@@ -11,17 +12,21 @@ from pydantic_settings import SettingsConfigDict
 from fleetmind_rag.app import (
     DEFAULT_SYSTEM_PROMPT,
     build_adaptive_grounded_answer_message,
+    build_feedback_gate_json,
+    build_feedback_gate_message,
     build_feedback_report_message,
     build_feedback_trend_message,
     build_system_prompt,
     main,
     run_ask,
+    run_feedback_gate,
     run_feedback_report,
     run_feedback_trend,
     run_index,
 )
 from fleetmind_rag.config import FleetMindSettings
 from fleetmind_rag.feedback_analytics import RoutingFeedbackAnalyzer
+from fleetmind_rag.feedback_gates import FeedbackRegressionGate
 from fleetmind_rag.feedback_routing import (
     RoutingFeedbackHistory,
     RoutingFeedbackObservation,
@@ -708,7 +713,9 @@ def test_cli_parser_lists_rag_commands(capsys: pytest.CaptureFixture[str]) -> No
     captured = capsys.readouterr()
 
     assert error.value.code == 0
-    assert "{chat,index,ask,feedback-report,feedback-trend}" in captured.out
+    assert (
+        "{chat,index,ask,feedback-report,feedback-trend,feedback-gate}" in captured.out
+    )
     assert "citation-grounded" in captured.out
     assert "persisted adaptive-routing feedback" in captured.out
     assert captured.err == ""
@@ -1083,4 +1090,311 @@ def test_feedback_trend_help_lists_comparison_controls(
     assert "--window-size" in captured.out
     assert "--minimum-change" in captured.out
     assert "--minimum-strategy-observations" in captured.out
+    assert captured.err == ""
+
+
+def _gate_history(*, regressing: bool = False) -> RoutingFeedbackHistory:
+    if regressing:
+        return RoutingFeedbackHistory(
+            (
+                RoutingFeedbackObservation(
+                    query="What does overheating mean?",
+                    strategy="dense",
+                    verdict="accept",
+                    quality_score=1.0,
+                    attempt_number=1,
+                    features=("conceptual",),
+                ),
+                RoutingFeedbackObservation(
+                    query="What does overheating mean?",
+                    strategy="dense",
+                    verdict="accept",
+                    quality_score=1.0,
+                    attempt_number=1,
+                    features=("conceptual",),
+                ),
+                RoutingFeedbackObservation(
+                    query="What does overheating mean?",
+                    strategy="dense",
+                    verdict="rewrite",
+                    quality_score=0.0,
+                    attempt_number=2,
+                    features=("conceptual",),
+                ),
+                RoutingFeedbackObservation(
+                    query="What does overheating mean?",
+                    strategy="dense",
+                    verdict="rewrite",
+                    quality_score=0.0,
+                    attempt_number=2,
+                    features=("conceptual",),
+                ),
+            )
+        )
+
+    return RoutingFeedbackHistory(
+        (
+            RoutingFeedbackObservation(
+                query="What does overheating mean?",
+                strategy="dense",
+                verdict="accept",
+                quality_score=1.0,
+                attempt_number=1,
+                features=("conceptual",),
+            ),
+        )
+    )
+
+
+def _gate_result(*, regressing: bool = False) -> Any:
+    trend = RoutingFeedbackTrendAnalyzer(
+        FeedbackTrendPolicy(
+            window_size=2,
+            minimum_strategy_observations=1,
+        )
+    ).analyze(_gate_history(regressing=regressing), revision=8)
+    return FeedbackRegressionGate().evaluate(trend)
+
+
+def test_build_feedback_gate_message_formats_warning() -> None:
+    result = _gate_result()
+
+    message = build_feedback_gate_message(
+        result,
+        path=Path("data/qdrant_local/routing_feedback.json"),
+        schema_version=1,
+        enforcement="fail",
+        process_exit_code=0,
+    )
+
+    assert "FleetMind routing feedback regression gate" in message
+    assert "Revision: 8" in message
+    assert "Status: warn" in message
+    assert "Overall trend: insufficient_data" in message
+    assert "Regressing strategies: none" in message
+    assert "Insufficient strategies: dense" in message
+    assert "Recommended exit code: 2" in message
+    assert "Enforcement: fail" in message
+    assert "Process exit code: 0" in message
+    assert "Reasons:" in message
+
+
+def test_build_feedback_gate_json_is_machine_readable() -> None:
+    result = _gate_result(regressing=True)
+
+    message = build_feedback_gate_json(
+        result,
+        path=Path("feedback.json"),
+        schema_version=1,
+        enforcement="fail",
+        process_exit_code=3,
+    )
+    payload = json.loads(message)
+
+    assert payload["output_schema_version"] == 1
+    assert payload["store_schema_version"] == 1
+    assert payload["revision"] == 8
+    assert payload["status"] == "fail"
+    assert payload["overall_direction"] == "regressing"
+    assert payload["regressing_strategies"] == ["dense"]
+    assert payload["recommended_exit_code"] == 3
+    assert payload["process_exit_code"] == 3
+    assert payload["enforcement"] == "fail"
+    assert payload["trend"]["window_size"] == 2
+    assert payload["trend"]["utility_delta"] == pytest.approx(-1.0)
+
+
+def test_run_feedback_gate_warns_without_failing_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    settings = _TestFleetMindSettings()
+
+    class _FakeStore:
+        def __init__(self, path: Path) -> None:
+            assert path == Path("data/qdrant_local/routing_feedback.json")
+
+        def load(self) -> FeedbackStoreSnapshot:
+            return FeedbackStoreSnapshot(
+                history=RoutingFeedbackHistory(
+                    (
+                        RoutingFeedbackObservation(
+                            query="What does overheating mean?",
+                            strategy="dense",
+                            verdict="accept",
+                            quality_score=1.0,
+                            attempt_number=1,
+                            features=("conceptual",),
+                        ),
+                    )
+                ),
+                revision=2,
+            )
+
+    monkeypatch.setattr(
+        "fleetmind_rag.app.JsonRoutingFeedbackStore",
+        _FakeStore,
+    )
+
+    exit_code = run_feedback_gate(
+        settings,
+        window_size=2,
+        minimum_strategy_observations=1,
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Status: warn" in captured.out
+    assert "Recommended exit code: 2" in captured.out
+    assert "Process exit code: 0" in captured.out
+    assert captured.err == ""
+
+
+def test_run_feedback_gate_can_enforce_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    settings = _TestFleetMindSettings()
+
+    class _FakeStore:
+        def __init__(self, path: Path) -> None:
+            del path
+
+        def load(self) -> FeedbackStoreSnapshot:
+            return FeedbackStoreSnapshot(
+                history=RoutingFeedbackHistory(),
+                revision=0,
+            )
+
+    monkeypatch.setattr(
+        "fleetmind_rag.app.JsonRoutingFeedbackStore",
+        _FakeStore,
+    )
+
+    exit_code = run_feedback_gate(
+        settings,
+        window_size=2,
+        minimum_strategy_observations=1,
+        enforcement="warn",
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 2
+    assert "Status: warn" in captured.out
+    assert "Process exit code: 2" in captured.out
+
+
+def test_run_feedback_gate_returns_failure_exit_code(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    settings = _TestFleetMindSettings()
+
+    class _FakeStore:
+        def __init__(self, path: Path) -> None:
+            del path
+
+        def load(self) -> FeedbackStoreSnapshot:
+            return FeedbackStoreSnapshot(
+                history=_gate_history(regressing=True),
+                revision=8,
+            )
+
+    monkeypatch.setattr(
+        "fleetmind_rag.app.JsonRoutingFeedbackStore",
+        _FakeStore,
+    )
+
+    exit_code = run_feedback_gate(
+        settings,
+        window_size=2,
+        minimum_strategy_observations=1,
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 3
+    assert "Status: fail" in captured.out
+    assert "Process exit code: 3" in captured.out
+
+
+def test_feedback_gate_command_outputs_json_and_forwards_controls(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    class _FakeStore:
+        def __init__(self, path: Path) -> None:
+            assert path == Path("data/qdrant_local/routing_feedback.json")
+
+        def load(self) -> FeedbackStoreSnapshot:
+            return FeedbackStoreSnapshot(
+                history=RoutingFeedbackHistory(),
+                revision=4,
+            )
+
+    monkeypatch.setattr(
+        "fleetmind_rag.app.JsonRoutingFeedbackStore",
+        _FakeStore,
+    )
+
+    exit_code = main(
+        [
+            "feedback-gate",
+            "--window-size",
+            "3",
+            "--minimum-change",
+            "0.10",
+            "--minimum-strategy-observations",
+            "1",
+            "--format",
+            "json",
+            "--fail-on",
+            "never",
+        ]
+    )
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+
+    assert exit_code == 0
+    assert payload["revision"] == 4
+    assert payload["status"] == "warn"
+    assert payload["enforcement"] == "never"
+    assert payload["process_exit_code"] == 0
+    assert payload["trend"]["window_size"] == 3
+    assert payload["trend"]["minimum_utility_change"] == pytest.approx(0.1)
+    assert captured.err == ""
+
+
+def test_run_feedback_gate_rejects_unknown_output_format(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code = run_feedback_gate(
+        _TestFleetMindSettings(),
+        output_format="xml",
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert captured.out == ""
+    assert captured.err == (
+        "FleetMind feedback gate failed: unsupported output format: 'xml'\n"
+    )
+
+
+def test_feedback_gate_help_lists_automation_controls(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as error:
+        main(["feedback-gate", "--help"])
+
+    captured = capsys.readouterr()
+
+    assert error.value.code == 0
+    assert "--window-size" in captured.out
+    assert "--minimum-change" in captured.out
+    assert "--minimum-strategy-observations" in captured.out
+    assert "--format {text,json}" in captured.out
+    assert "--fail-on {warn,fail,never}" in captured.out
     assert captured.err == ""

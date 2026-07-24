@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -12,6 +13,11 @@ from fleetmind_rag.config import FleetMindSettings
 from fleetmind_rag.feedback_analytics import (
     RoutingFeedbackAnalyzer,
     RoutingFeedbackReport,
+)
+from fleetmind_rag.feedback_gates import (
+    FeedbackRegressionGate,
+    FeedbackRegressionGateResult,
+    GateEnforcement,
 )
 from fleetmind_rag.feedback_store import JsonRoutingFeedbackStore
 from fleetmind_rag.feedback_trends import (
@@ -330,6 +336,84 @@ def _format_signed_percentage(value: float | None) -> str:
     return "n/a" if value is None else f"{value:+.2%}"
 
 
+def build_feedback_gate_message(
+    result: FeedbackRegressionGateResult,
+    *,
+    path: Path,
+    schema_version: int,
+    enforcement: GateEnforcement,
+    process_exit_code: int,
+) -> str:
+    """Build a human-readable routing-feedback regression gate result."""
+
+    return "\n".join(
+        (
+            "FleetMind routing feedback regression gate",
+            f"Path: {path}",
+            f"Schema version: {schema_version}",
+            f"Revision: {result.trend_report.revision}",
+            f"Status: {result.status}",
+            f"Overall trend: {result.overall_direction}",
+            (
+                "Regressing strategies: "
+                f"{_format_strategy_list(result.regressing_strategies)}"
+            ),
+            (
+                "Insufficient strategies: "
+                f"{_format_strategy_list(result.insufficient_strategies)}"
+            ),
+            f"Recommended exit code: {result.recommended_exit_code}",
+            f"Enforcement: {enforcement}",
+            f"Process exit code: {process_exit_code}",
+            "Reasons:",
+            *(f"- {reason}" for reason in result.reasons),
+        )
+    )
+
+
+def build_feedback_gate_json(
+    result: FeedbackRegressionGateResult,
+    *,
+    path: Path,
+    schema_version: int,
+    enforcement: GateEnforcement,
+    process_exit_code: int,
+) -> str:
+    """Build deterministic machine-readable regression gate output."""
+
+    payload = {
+        "enforcement": enforcement,
+        "insufficient_strategies": list(result.insufficient_strategies),
+        "output_schema_version": 1,
+        "overall_direction": result.overall_direction,
+        "path": str(path),
+        "process_exit_code": process_exit_code,
+        "recommended_exit_code": result.recommended_exit_code,
+        "reasons": list(result.reasons),
+        "regressing_strategies": list(result.regressing_strategies),
+        "revision": result.trend_report.revision,
+        "status": result.status,
+        "store_schema_version": schema_version,
+        "trend": {
+            "minimum_utility_change": (
+                result.trend_report.policy.minimum_utility_change
+            ),
+            "recent_end_position": (result.trend_report.recent_end_position),
+            "recent_start_position": (result.trend_report.recent_start_position),
+            "total_observations": result.trend_report.total_observations,
+            "utility_delta": result.trend_report.overall.utility_delta,
+            "window_size": result.trend_report.policy.window_size,
+        },
+    }
+    return json.dumps(payload, indent=2, sort_keys=True, allow_nan=False)
+
+
+def _format_strategy_list(
+    strategies: tuple[str, ...],
+) -> str:
+    return "none" if not strategies else ", ".join(strategies)
+
+
 def build_cli_parser() -> argparse.ArgumentParser:
     """Build the FleetMind-RAG command-line argument parser."""
 
@@ -449,6 +533,40 @@ def build_cli_parser() -> argparse.ArgumentParser:
         type=int,
         default=2,
         help="Required strategy observations in each comparison window.",
+    )
+    gate_parser = subparsers.add_parser(
+        "feedback-gate",
+        help="Evaluate routing-feedback trends as an operational gate.",
+    )
+    gate_parser.add_argument(
+        "--window-size",
+        type=int,
+        default=10,
+        help="Observations per chronological comparison window.",
+    )
+    gate_parser.add_argument(
+        "--minimum-change",
+        type=float,
+        default=0.05,
+        help="Minimum absolute utility change for improvement or regression.",
+    )
+    gate_parser.add_argument(
+        "--minimum-strategy-observations",
+        type=int,
+        default=2,
+        help="Required strategy observations in each comparison window.",
+    )
+    gate_parser.add_argument(
+        "--format",
+        choices=("text", "json"),
+        default="text",
+        help="Output format for people or automation.",
+    )
+    gate_parser.add_argument(
+        "--fail-on",
+        choices=("warn", "fail", "never"),
+        default="fail",
+        help="Lowest gate status that produces a non-zero exit code.",
     )
 
     return parser
@@ -678,6 +796,69 @@ def run_feedback_trend(
     return 0
 
 
+def run_feedback_gate(
+    settings: FleetMindSettings,
+    *,
+    window_size: int = 10,
+    minimum_utility_change: float = 0.05,
+    minimum_strategy_observations: int = 2,
+    output_format: str = "text",
+    enforcement: GateEnforcement = "fail",
+) -> int:
+    """Evaluate the persisted trend report as an automation-friendly gate."""
+
+    if output_format not in {"text", "json"}:
+        print(
+            f"FleetMind feedback gate failed: unsupported output format: "
+            f"{output_format!r}",
+            file=sys.stderr,
+        )
+        return 1
+
+    path = settings.qdrant_path / "routing_feedback.json"
+
+    try:
+        snapshot = JsonRoutingFeedbackStore(path).load()
+        trend_report = RoutingFeedbackTrendAnalyzer(
+            FeedbackTrendPolicy(
+                window_size=window_size,
+                minimum_utility_change=minimum_utility_change,
+                minimum_strategy_observations=minimum_strategy_observations,
+            )
+        ).analyze(
+            snapshot.history,
+            revision=snapshot.revision,
+        )
+        result = FeedbackRegressionGate().evaluate(trend_report)
+        exit_code = result.process_exit_code(enforcement)
+    except (OSError, ValueError, RuntimeError) as error:
+        print(f"FleetMind feedback gate failed: {error}", file=sys.stderr)
+        return 1
+
+    if output_format == "json":
+        print(
+            build_feedback_gate_json(
+                result,
+                path=path,
+                schema_version=snapshot.schema_version,
+                enforcement=enforcement,
+                process_exit_code=exit_code,
+            )
+        )
+    else:
+        print(
+            build_feedback_gate_message(
+                result,
+                path=path,
+                schema_version=snapshot.schema_version,
+                enforcement=enforcement,
+                process_exit_code=exit_code,
+            )
+        )
+
+    return exit_code
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the FleetMind-RAG command-line application."""
 
@@ -724,6 +905,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 int,
                 args.minimum_strategy_observations,
             ),
+        )
+
+    if command == "feedback-gate":
+        return run_feedback_gate(
+            settings,
+            window_size=cast(int, args.window_size),
+            minimum_utility_change=cast(float, args.minimum_change),
+            minimum_strategy_observations=cast(
+                int,
+                args.minimum_strategy_observations,
+            ),
+            output_format=cast(str, args.format),
+            enforcement=cast(GateEnforcement, args.fail_on),
         )
 
     return run_status(settings)

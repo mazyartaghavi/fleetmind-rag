@@ -9,6 +9,11 @@ from typing import cast
 from fleetmind_rag.adaptive_grounded_rag import AdaptiveGroundedAnswerResult
 from fleetmind_rag.adaptive_retrieval import AdaptiveRetrievalConfig
 from fleetmind_rag.config import FleetMindSettings
+from fleetmind_rag.feedback_analytics import (
+    RoutingFeedbackAnalyzer,
+    RoutingFeedbackReport,
+)
+from fleetmind_rag.feedback_store import JsonRoutingFeedbackStore
 from fleetmind_rag.grounded_rag import GroundedAnswerResult
 from fleetmind_rag.ollama import (
     OllamaChatClient,
@@ -157,6 +162,84 @@ def build_adaptive_grounded_answer_message(
     return "\n".join(lines)
 
 
+def build_feedback_report_message(
+    report: RoutingFeedbackReport,
+    *,
+    path: Path,
+    schema_version: int,
+) -> str:
+    """Build a deterministic terminal report for persisted routing feedback."""
+
+    lines = [
+        "FleetMind routing feedback report",
+        f"Path: {path}",
+        f"Schema version: {schema_version}",
+        f"Revision: {report.revision}",
+        f"Observations: {report.observation_count}",
+        f"Accepted: {report.accepted_count}",
+        f"Rewrites: {report.rewrite_count}",
+        f"Acceptance rate: {_format_percentage(report.acceptance_rate)}",
+        f"Rewrite rate: {_format_percentage(report.rewrite_rate)}",
+        f"Average quality: {_format_decimal(report.average_quality_score)}",
+        f"Average attempt: {_format_decimal(report.average_attempt_number)}",
+        f"Retry-attempt rate: {_format_percentage(report.retry_rate)}",
+        "",
+        "Strategy performance:",
+        (
+            "strategy   observations  accepted  rewrites  "
+            "acceptance  quality  retry-rate"
+        ),
+    ]
+
+    lines.extend(
+        (
+            f"{metrics.strategy:10}"
+            f"{metrics.observation_count:12}"
+            f"{metrics.accepted_count:10}"
+            f"{metrics.rewrite_count:10}  "
+            f"{_format_percentage(metrics.acceptance_rate):>10}  "
+            f"{_format_decimal(metrics.average_quality_score):>7}  "
+            f"{_format_percentage(metrics.retry_rate):>10}"
+        )
+        for metrics in report.strategies
+    )
+
+    observed_features = tuple(
+        metrics for metrics in report.features if metrics.observation_count > 0
+    )
+    lines.extend(("", "Feature performance:"))
+
+    if not observed_features:
+        lines.append("No query-signal features have been observed.")
+    else:
+        lines.append(
+            "feature           observations  accepted  rewrites  "
+            "acceptance  quality  retry-rate"
+        )
+        lines.extend(
+            (
+                f"{metrics.feature:18}"
+                f"{metrics.observation_count:12}"
+                f"{metrics.accepted_count:10}"
+                f"{metrics.rewrite_count:10}  "
+                f"{_format_percentage(metrics.acceptance_rate):>10}  "
+                f"{_format_decimal(metrics.average_quality_score):>7}  "
+                f"{_format_percentage(metrics.retry_rate):>10}"
+            )
+            for metrics in observed_features
+        )
+
+    return "\n".join(lines)
+
+
+def _format_percentage(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.2%}"
+
+
+def _format_decimal(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:.4f}"
+
+
 def build_cli_parser() -> argparse.ArgumentParser:
     """Build the FleetMind-RAG command-line argument parser."""
 
@@ -249,6 +332,11 @@ def build_cli_parser() -> argparse.ArgumentParser:
             "Adaptive hybrid candidate pool; defaults to at least 20 and "
             "never less than --limit."
         ),
+    )
+
+    subparsers.add_parser(
+        "feedback-report",
+        help="Summarize persisted adaptive-routing feedback.",
     )
 
     return parser
@@ -416,6 +504,31 @@ def run_ask(
     return 0
 
 
+def run_feedback_report(settings: FleetMindSettings) -> int:
+    """Load and summarize the configured persistent routing feedback."""
+
+    path = settings.qdrant_path / "routing_feedback.json"
+
+    try:
+        snapshot = JsonRoutingFeedbackStore(path).load()
+        report = RoutingFeedbackAnalyzer().analyze(
+            snapshot.history,
+            revision=snapshot.revision,
+        )
+    except (OSError, ValueError, RuntimeError) as error:
+        print(f"FleetMind feedback report failed: {error}", file=sys.stderr)
+        return 1
+
+    print(
+        build_feedback_report_message(
+            report,
+            path=path,
+            schema_version=snapshot.schema_version,
+        )
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the FleetMind-RAG command-line application."""
 
@@ -449,5 +562,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             max_attempts=cast(int, args.max_attempts),
             candidate_limit=cast(int | None, args.candidate_limit),
         )
+
+    if command == "feedback-report":
+        return run_feedback_report(settings)
 
     return run_status(settings)

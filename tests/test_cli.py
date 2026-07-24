@@ -11,12 +11,15 @@ from pydantic_settings import SettingsConfigDict
 from fleetmind_rag.app import (
     DEFAULT_SYSTEM_PROMPT,
     build_adaptive_grounded_answer_message,
+    build_feedback_report_message,
     build_system_prompt,
     main,
     run_ask,
+    run_feedback_report,
     run_index,
 )
 from fleetmind_rag.config import FleetMindSettings
+from fleetmind_rag.feedback_analytics import RoutingFeedbackAnalyzer
 from fleetmind_rag.feedback_routing import (
     RoutingFeedbackHistory,
     RoutingFeedbackObservation,
@@ -699,8 +702,9 @@ def test_cli_parser_lists_rag_commands(capsys: pytest.CaptureFixture[str]) -> No
     captured = capsys.readouterr()
 
     assert error.value.code == 0
-    assert "{chat,index,ask}" in captured.out
+    assert "{chat,index,ask,feedback-report}" in captured.out
     assert "citation-grounded" in captured.out
+    assert "persisted adaptive-routing feedback" in captured.out
     assert captured.err == ""
 
 
@@ -717,3 +721,166 @@ def test_ask_help_lists_adaptive_controls(
     assert "--max-attempts" in captured.out
     assert "--candidate-limit" in captured.out
     assert captured.err == ""
+
+
+def _feedback_history() -> RoutingFeedbackHistory:
+    return RoutingFeedbackHistory(
+        (
+            RoutingFeedbackObservation(
+                query="What does overheating mean?",
+                strategy="dense",
+                verdict="accept",
+                quality_score=0.9,
+                attempt_number=1,
+                features=("conceptual",),
+            ),
+            RoutingFeedbackObservation(
+                query="What does overheating mean?",
+                strategy="hybrid",
+                verdict="rewrite",
+                quality_score=0.3,
+                attempt_number=2,
+                features=("conceptual",),
+            ),
+        )
+    )
+
+
+def test_build_feedback_report_message_formats_metrics() -> None:
+    report = RoutingFeedbackAnalyzer().analyze(
+        _feedback_history(),
+        revision=7,
+    )
+
+    message = build_feedback_report_message(
+        report,
+        path=Path("data/qdrant_local/routing_feedback.json"),
+        schema_version=1,
+    )
+
+    assert "FleetMind routing feedback report" in message
+    assert "Revision: 7" in message
+    assert "Observations: 2" in message
+    assert "Accepted: 1" in message
+    assert "Rewrites: 1" in message
+    assert "Acceptance rate: 50.00%" in message
+    assert "Rewrite rate: 50.00%" in message
+    assert "Average quality: 0.6000" in message
+    assert "Average attempt: 1.5000" in message
+    assert "Retry-attempt rate: 50.00%" in message
+    assert "dense" in message
+    assert "hybrid" in message
+    assert "conceptual" in message
+
+
+def test_build_feedback_report_message_handles_empty_history() -> None:
+    report = RoutingFeedbackAnalyzer().analyze(RoutingFeedbackHistory())
+
+    message = build_feedback_report_message(
+        report,
+        path=Path("feedback.json"),
+        schema_version=1,
+    )
+
+    assert "Observations: 0" in message
+    assert "Acceptance rate: n/a" in message
+    assert "Average quality: n/a" in message
+    assert "No query-signal features have been observed." in message
+
+
+def test_run_feedback_report_loads_configured_store_and_prints_report(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    settings = _TestFleetMindSettings(qdrant_path=tmp_path / "qdrant")
+    expected_path = tmp_path / "qdrant" / "routing_feedback.json"
+    snapshot = FeedbackStoreSnapshot(
+        history=_feedback_history(),
+        revision=11,
+    )
+    created_paths: list[Path] = []
+
+    class _FakeStore:
+        def __init__(self, path: Path) -> None:
+            created_paths.append(path)
+
+        def load(self) -> FeedbackStoreSnapshot:
+            return snapshot
+
+    monkeypatch.setattr(
+        "fleetmind_rag.app.JsonRoutingFeedbackStore",
+        _FakeStore,
+    )
+
+    exit_code = run_feedback_report(settings)
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert created_paths == [expected_path]
+    assert f"Path: {expected_path}" in captured.out
+    assert "Schema version: 1" in captured.out
+    assert "Revision: 11" in captured.out
+    assert "Observations: 2" in captured.out
+    assert captured.err == ""
+
+
+def test_feedback_report_command_routes_through_main(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    snapshot = FeedbackStoreSnapshot(
+        history=_feedback_history(),
+        revision=3,
+    )
+
+    class _FakeStore:
+        def __init__(self, path: Path) -> None:
+            assert path == Path("data/qdrant_local/routing_feedback.json")
+
+        def load(self) -> FeedbackStoreSnapshot:
+            return snapshot
+
+    monkeypatch.setattr(
+        "fleetmind_rag.app.JsonRoutingFeedbackStore",
+        _FakeStore,
+    )
+
+    exit_code = main(["feedback-report"])
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Revision: 3" in captured.out
+    assert "Strategy performance:" in captured.out
+    assert "Feature performance:" in captured.out
+    assert captured.err == ""
+
+
+def test_feedback_report_returns_failure_for_invalid_store(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    settings = _TestFleetMindSettings()
+
+    class _FailedStore:
+        def __init__(self, path: Path) -> None:
+            del path
+
+        def load(self) -> FeedbackStoreSnapshot:
+            raise RuntimeError("feedback JSON is malformed")
+
+    monkeypatch.setattr(
+        "fleetmind_rag.app.JsonRoutingFeedbackStore",
+        _FailedStore,
+    )
+
+    exit_code = run_feedback_report(settings)
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert captured.out == ""
+    assert captured.err == (
+        "FleetMind feedback report failed: feedback JSON is malformed\n"
+    )

@@ -1,101 +1,65 @@
 # FleetMind-RAG
 
-An agentic retrieval-augmented generation system for intelligent fleet operations, technical-document assistance, and feedback-driven retrieval-policy optimization.
+FleetMind-RAG is a local-first, citation-grounded assistant for fleet
+operations and technical-document support. It combines deterministic query
+routing, dense and sparse retrieval, adaptive retry, LangGraph orchestration,
+and persistent feedback analytics.
 
-> **Project status:** Foundation stage. The repository is being developed incrementally from Python engineering fundamentals to production-oriented RAG, agentic workflows, evaluation, and reinforcement-learning-based retrieval routing.
+> **Project status:** The core adaptive RAG and feedback-control pipeline is
+> implemented and tested. Current work focuses on operational documentation,
+> release readiness, and later API and deployment layers.
 
-## Overview
+## Capabilities
 
-FleetMind-RAG is a project-based learning and portfolio system that combines generative AI with reinforcement learning.
+- Ingest sectioned fleet manuals into persistent local Qdrant storage.
+- Retrieve evidence with dense, BM25 sparse, hybrid RRF, or transparent
+  reranked search.
+- Route each query using explainable lexical, conceptual, safety, and
+  complexity signals.
+- Check retrieval quality and deterministically rewrite weak queries.
+- Coordinate bounded retrieve-assess-rewrite loops with LangGraph.
+- Produce citation-grounded answers or safely abstain when evidence is weak.
+- Persist immutable routing-feedback observations in versioned JSON.
+- Report aggregate strategy and feature performance.
+- Compare chronological feedback windows for improving, stable, regressing,
+  or insufficient-data trends.
+- Enforce regression gates locally and in GitHub Actions.
 
-The completed system will assist fleet operators with tasks such as:
+## Architecture
 
-* Retrieving evidence from maintenance manuals and operational procedures
-* Answering technical questions with document citations
-* Inspecting simulated vehicle telemetry and maintenance history
-* Recommending operational or maintenance actions
-* Preparing maintenance tickets through controlled tool calls
-* Escalating uncertain or safety-sensitive decisions for human review
-* Learning which retrieval strategy performs best for different queries
-
-The project is designed as a production-oriented AI application rather than a standalone chatbot.
-
-## Project Objectives
-
-The project has four main objectives:
-
-1. Build a reliable retrieval-augmented generation pipeline.
-2. Develop a stateful, tool-using agentic workflow.
-3. Evaluate retrieval, generation, safety, latency, and cost quantitatively.
-4. Apply contextual-bandit reinforcement learning to retrieval-strategy selection.
-
-## Planned System Flow
-
-```text
-User
-  |
-  v
-API or user interface
-  |
-  v
-Agentic workflow
-  |
-  +----> Document retrieval and reranking
-  |
-  +----> Fleet telemetry and maintenance tools
-  |
-  +----> Local or hosted LLM
-  |
-  v
-Grounded answer, citations, or human escalation
-  |
-  v
-Evaluation and user feedback
-  |
-  v
-Contextual-bandit retrieval router
+```mermaid
+flowchart TD
+    Q["User query"] --> R["Explainable router"]
+    R --> X["Routed retrieval"]
+    X --> C["Quality checker"]
+    C -->|Weak evidence| W["Rewrite and retry"]
+    W --> R
+    C -->|Accepted evidence| G["Grounded answer"]
+    G --> F["Persistent feedback"]
+    F --> A["Analytics and trends"]
+    A --> P["Regression gate"]
 ```
 
-## Development Roadmap
+See [`docs/architecture.md`](docs/architecture.md) for component boundaries and
+data flow.
 
-* [x] Initialize the Python package and Git repository
-* [x] Configure Python 3.12 and dependency management with `uv`
-* [x] Publish the initial public GitHub repository
-* [ ] Add code-quality, type-checking, testing, and CI tools
-* [ ] Run a local Llama model through Ollama
-* [ ] Implement structured prompting and validated model output
-* [ ] Build document ingestion, chunking, and embeddings
-* [ ] Add Qdrant semantic search
-* [ ] Implement basic and advanced RAG
-* [ ] Refactor the pipeline with LangChain
-* [ ] Build a stateful LangGraph workflow
-* [ ] Add fleet tools and human approval
-* [ ] Create retrieval and generation evaluation suites
-* [ ] Implement a contextual-bandit retrieval router
-* [ ] Expose the application through FastAPI
-* [ ] Add Docker, observability, security checks, and CI/CD
+## Technology
 
-## Planned Technology Stack
+| Area | Current technology |
+| --- | --- |
+| Language | Python 3.12 |
+| Dependency management | uv |
+| Local LLM and embeddings | Ollama |
+| Agent orchestration | LangGraph |
+| Vector storage | Qdrant local mode |
+| Configuration | pydantic-settings |
+| Testing and coverage | pytest, pytest-cov |
+| Formatting and linting | Ruff |
+| Static typing | strict mypy |
+| Continuous integration | GitHub Actions |
 
-| Area                         | Technology                            |
-| ---------------------------- | ------------------------------------- |
-| Programming language         | Python 3.12                           |
-| Project management           | uv                                    |
-| Local language model         | Llama through Ollama                  |
-| LLM application framework    | LangChain                             |
-| Agent orchestration          | LangGraph                             |
-| Vector database              | Qdrant                                |
-| API                          | FastAPI                               |
-| Validation and configuration | Pydantic                              |
-| Testing                      | pytest                                |
-| Linting and formatting       | Ruff                                  |
-| Static type checking         | mypy                                  |
-| Containers                   | Docker and Docker Compose             |
-| Continuous integration       | GitHub Actions                        |
-| Reinforcement learning       | Contextual bandits                    |
-| Evaluation and observability | Custom metrics and optional LangSmith |
-
-Technology entries marked as planned will be introduced progressively as the corresponding project stages are implemented.
+FastAPI, container deployment, fleet-system tool calls, and human-approval
+interfaces remain future work.
 
 ## Quick Start
 
@@ -103,110 +67,188 @@ Technology entries marked as planned will be introduced progressively as the cor
 
 Install:
 
-* Git
-* Python 3.12
-* uv
+- Git
+- Python 3.12
+- uv
+- Ollama
 
-### Clone the Repository
+Clone and synchronize the locked environment:
 
 ```powershell
 git clone https://github.com/mazyartaghavi/fleetmind-rag.git
 Set-Location fleetmind-rag
-```
-
-### Install the Environment
-
-```powershell
 uv python install 3.12
-uv sync
+uv sync --locked
 ```
 
-### Run the Current Application
-
-```powershell
-uv run fleetmind-rag
-```
-
-During the foundation stage, the expected output is:
-
-```text
-Hello from fleetmind-rag!
-```
-
-## Configuration
-
-The repository contains `.env.example`, which documents the planned environment variables.
-
-Create a local configuration file with:
+Create local configuration:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-Never commit `.env`, access tokens, API keys, passwords, or other credentials.
+Start Ollama and obtain the configured models:
 
-## Current Repository Structure
+```powershell
+ollama pull llama3.2:3b
+ollama pull embeddinggemma
+ollama list
+```
+
+Check FleetMind configuration and Ollama availability:
+
+```powershell
+uv run fleetmind-rag
+```
+
+## Index a Document
+
+The repository includes a small evaluation manual:
+
+```powershell
+uv run fleetmind-rag index `
+    evaluation/data/fleet_manual.md `
+    --recreate
+```
+
+`--recreate` rebuilds the configured collection. Use it deliberately because
+existing indexed chunks are replaced.
+
+## Ask Questions
+
+Run the established grounded-answer path:
+
+```powershell
+uv run fleetmind-rag ask `
+    "What should the driver do if a battery warning appears with smoke?" `
+    --limit 5
+```
+
+Run adaptive retrieval with bounded rewrite and retry:
+
+```powershell
+uv run fleetmind-rag ask `
+    "What should the driver do if a battery warning appears with smoke?" `
+    --adaptive `
+    --limit 5 `
+    --max-attempts 3 `
+    --candidate-limit 20
+```
+
+Adaptive output reports workflow status, attempt count, rewrite count, initial
+and final strategies, and persisted feedback revision.
+
+## Feedback Operations
+
+Summarize the persistent feedback history:
+
+```powershell
+uv run fleetmind-rag feedback-report
+```
+
+Compare the newest feedback window with the preceding window:
+
+```powershell
+uv run fleetmind-rag feedback-trend `
+    --window-size 10 `
+    --minimum-change 0.05 `
+    --minimum-strategy-observations 2
+```
+
+Run the operational regression gate:
+
+```powershell
+uv run fleetmind-rag feedback-gate `
+    --format json `
+    --fail-on fail
+```
+
+Gate exit codes are stable:
+
+| Code | Meaning |
+| ---: | --- |
+| 0 | Gate passed, or the selected enforcement mode permits the status |
+| 1 | Configuration, storage, or execution error |
+| 2 | Enforced warning, normally insufficient evidence |
+| 3 | Enforced feedback regression |
+
+The repository’s CI uses a synthetic snapshot:
+
+```powershell
+uv run fleetmind-rag feedback-gate `
+    --feedback-path evaluation/data/routing_feedback_ci.json `
+    --window-size 10 `
+    --minimum-change 0.05 `
+    --minimum-strategy-observations 2 `
+    --format json `
+    --fail-on warn
+```
+
+The synthetic snapshot is reproducible test evidence. It is separate from the
+private runtime file under `data/qdrant_local`.
+
+## Quality Gate
+
+Run the same core checks used by GitHub Actions:
+
+```powershell
+uv lock --check
+uv run ruff format --check .
+uv run ruff check .
+uv run mypy src tests
+uv run pytest --cov=fleetmind_rag --cov-report=term-missing
+```
+
+The configured minimum total coverage is 80 percent.
+
+## Safety Properties
+
+FleetMind:
+
+- grounds answers in retrieved document evidence;
+- displays source references;
+- validates generated answers and can use extractive fallback;
+- abstains when evidence is not sufficient;
+- handles permission-sensitive operational questions deterministically;
+- keeps runtime feedback outside version control;
+- bounds adaptive retry attempts;
+- exposes routing, quality, trend, and gate decisions for inspection.
+
+It is a decision-support prototype, not a substitute for authorized
+technicians, fleet policy, emergency procedures, or professional safety
+judgment.
+
+## Repository Guide
 
 ```text
 fleetmind-rag/
+├── .github/workflows/ci.yml
 ├── docs/
-│   └── development.md
-├── src/
-│   └── fleetmind_rag/
-│       └── __init__.py
-├── .editorconfig
+│   ├── architecture.md
+│   ├── development.md
+│   └── operations.md
+├── evaluation/data/
+├── src/fleetmind_rag/
+├── tests/
 ├── .env.example
-├── .gitattributes
-├── .gitignore
-├── .python-version
-├── LICENSE
 ├── pyproject.toml
-├── README.md
 └── uv.lock
 ```
 
-The repository structure will expand as retrieval, agents, evaluation, APIs, and reinforcement learning are implemented.
-
-## Evaluation Plan
-
-The completed project will evaluate:
-
-* Retrieval recall and ranking quality
-* Answer relevance and faithfulness
-* Citation correctness and completeness
-* Abstention accuracy
-* Tool-call success
-* Human-escalation behavior
-* End-to-end latency
-* Computational cost
-* Retrieval-policy reward
-
-Experimental results will be generated from reproducible evaluation scripts rather than manually entered values.
-
-## Responsible AI Principles
-
-FleetMind-RAG will be designed to:
-
-* Ground operational recommendations in retrieved evidence
-* Display document sources
-* Abstain when evidence is insufficient
-* Separate read-only tools from state-changing actions
-* Require human approval for sensitive actions
-* Record evaluation and failure cases
-* Avoid presenting the system as a substitute for qualified technical or safety personnel
-
-## Documentation
-
-Development setup instructions are available in [`docs/development.md`](docs/development.md).
-
-Additional architecture, RAG, agent, evaluation, and reinforcement-learning documentation will be added as the project develops.
+- [`docs/development.md`](docs/development.md): environment, testing, and Git
+  workflow.
+- [`docs/architecture.md`](docs/architecture.md): modules and control flow.
+- [`docs/operations.md`](docs/operations.md): runtime procedures, feedback,
+  gates, recovery, and troubleshooting.
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+FleetMind-RAG is licensed under the [MIT License](LICENSE).
 
 ## Author
 
 **Mazyar Taghavi**
 
-AI engineer and reinforcement-learning researcher developing practical systems at the intersection of reinforcement learning, generative AI, intelligent agents, and mathematical optimization.
+AI engineer and reinforcement-learning researcher working at the intersection
+of reinforcement learning, generative AI, intelligent agents, and
+mathematical optimization.

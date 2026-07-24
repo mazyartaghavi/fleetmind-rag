@@ -1,169 +1,108 @@
 # Development Guide
 
-This guide explains how to prepare a local development environment, run FleetMind-RAG, execute quality checks, and contribute changes through Git.
+This guide covers local setup, quality checks, testing, and the Git workflow
+for FleetMind-RAG.
 
 ## Prerequisites
 
-Install the following tools before working with the project:
+Install Git, Python 3.12, uv, Visual Studio Code, GitHub CLI, and Ollama.
 
-* Git
-* Python 3.12
-* uv
-* Visual Studio Code
-* GitHub CLI
-
-Verify the main tools:
+Verify them in the VS Code integrated PowerShell terminal:
 
 ```powershell
 git --version
 uv --version
 gh --version
+ollama --version
 ```
 
-## Clone the Repository
+## Environment Setup
 
-Clone the public repository and enter its directory:
+Clone the project and enter its root:
 
 ```powershell
 git clone https://github.com/mazyartaghavi/fleetmind-rag.git
 Set-Location fleetmind-rag
 ```
 
-## Install Python and Project Dependencies
-
-FleetMind-RAG uses Python 3.12 and `uv` for Python and dependency management.
-
-Install Python 3.12 if necessary:
+Install Python and synchronize exactly from the lockfile:
 
 ```powershell
 uv python install 3.12
+uv sync --locked
 ```
 
-Create or synchronize the project environment:
-
-```powershell
-uv sync
-```
-
-This command:
-
-* Reads `pyproject.toml`
-* Uses the versions resolved in `uv.lock`
-* Creates the `.venv` virtual environment when necessary
-* Installs runtime and development dependencies
-* Installs the local FleetMind-RAG package
-
-## Open the Project in Visual Studio Code
-
-From the repository root, run:
-
-```powershell
-code .
-```
-
-VS Code should detect and activate the project environment in its integrated terminal.
-
-The terminal prompt should resemble:
-
-```text
-(fleetmind-rag) PS C:\path\to\fleetmind-rag>
-```
-
-## Run the Application
-
-Run the current command-line application:
-
-```powershell
-uv run fleetmind-rag
-```
-
-During the initial foundation stage, the expected output is:
-
-```text
-Hello from fleetmind-rag!
-```
-
-## Local Configuration
-
-The `.env.example` file documents the planned configuration variables.
-
-Create a private local configuration file:
+Create private local configuration:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-Edit `.env` with local values when required.
+Never commit `.env`, credentials, private feedback, Qdrant local data, model
+files, or generated caches.
 
-Never commit:
+## Local Models
 
-* `.env`
-* API keys
-* Access tokens
-* Passwords
-* Private keys
-* Database credentials
+The default configuration expects:
 
-Git is configured to ignore `.env` and related local environment files while retaining `.env.example`.
-
-## Project Structure
-
-The current repository structure includes:
-
-```text
-fleetmind-rag/
-├── docs/
-│   └── development.md
-├── src/
-│   └── fleetmind_rag/
-│       └── __init__.py
-├── tests/
-│   └── test_smoke.py
-├── .editorconfig
-├── .env.example
-├── .gitattributes
-├── .gitignore
-├── .pre-commit-config.yaml
-├── .python-version
-├── LICENSE
-├── pyproject.toml
-├── README.md
-└── uv.lock
+```powershell
+ollama pull llama3.2:3b
+ollama pull embeddinggemma
+ollama list
 ```
 
-Application code belongs under `src/fleetmind_rag`, while automated tests belong under `tests`.
+Check the configured runtime:
+
+```powershell
+uv run fleetmind-rag
+```
+
+## Source Layout
+
+Application modules live in `src/fleetmind_rag`; tests mirror them under
+`tests`.
+
+Key module groups:
+
+- document ingestion and chunking: `documents.py`
+- Ollama clients: `ollama.py`
+- vector persistence: `vector_store.py`
+- dense, sparse, hybrid, and reranked search: `retrieval.py`
+- query routing and execution: `routing.py`, `routed_retrieval.py`
+- adaptive state and retries: `agent_state.py`, `adaptive_retrieval.py`
+- quality checks: `retrieval_quality.py`
+- LangGraph workflow: `langgraph_workflow.py`
+- grounded generation: `grounded_rag.py`, `adaptive_grounded_rag.py`
+- feedback control: `feedback_routing.py`, `feedback_store.py`,
+  `feedback_analytics.py`, `feedback_trends.py`, `feedback_gates.py`
+- runtime and CLI composition: `runtime.py`, `app.py`
 
 ## Dependency Management
 
-Add a runtime dependency with:
+Add a runtime dependency:
 
 ```powershell
 uv add PACKAGE_NAME
 ```
 
-Add a development-only dependency with:
+Add a development-only dependency:
 
 ```powershell
 uv add --dev PACKAGE_NAME
 ```
 
-After dependency changes, `uv` updates:
-
-* `pyproject.toml`
-* `uv.lock`
-* The local virtual environment
-
-Verify that the lockfile is current:
+Validate dependency resolution:
 
 ```powershell
 uv lock --check
 ```
 
-## Code Formatting
+Commit both `pyproject.toml` and `uv.lock` when a dependency intentionally
+changes.
 
-FleetMind-RAG uses Ruff as its Python formatter.
+## Formatting and Linting
 
-Check formatting without changing files:
+Check formatting:
 
 ```powershell
 uv run ruff format --check .
@@ -175,96 +114,79 @@ Apply formatting:
 uv run ruff format .
 ```
 
-Rerun the formatting check after automatic changes.
-
-## Linting
-
-Ruff also checks Python code for correctness, import ordering, common bugs, modernization opportunities, and simplification rules.
-
-Run the linter:
+Run linting:
 
 ```powershell
 uv run ruff check .
 ```
 
-Apply supported automatic fixes:
+Apply supported lint fixes:
 
 ```powershell
 uv run ruff check . --fix
 ```
 
-Review all automatic changes before committing them.
+Review automatic changes before staging them.
 
-## Static Type Checking
-
-FleetMind-RAG uses mypy in strict mode.
-
-Check application and test code:
+## Strict Type Checking
 
 ```powershell
 uv run mypy src tests
 ```
 
-Type checking helps identify inconsistent function arguments, return values, attributes, and unreachable code without executing the application.
+The project uses strict mypy settings and checks application code and tests.
 
-## Automated Tests
+## Tests and Coverage
 
-Run the test suite:
-
-```powershell
-uv run pytest
-```
-
-pytest discovers tests in the `tests` directory. Test files and test functions follow names such as:
-
-```text
-test_example.py
-test_expected_behavior()
-```
-
-## Test Coverage
-
-Measure which application statements and branches execute during testing:
+Run the complete suite:
 
 ```powershell
-uv run pytest --cov=fleetmind_rag --cov-report=term-missing
+uv run python -m pytest -q
 ```
 
-The project currently requires at least 80 percent total coverage.
+Run coverage:
 
-Coverage is useful for identifying untested code, but high coverage alone does not prove correctness. Tests should verify meaningful behavior and failure cases.
+```powershell
+uv run pytest `
+    --cov=fleetmind_rag `
+    --cov-report=term-missing
+```
+
+The configured project-wide minimum is 80 percent. Coverage complements, but
+does not replace, behavioral assertions and failure-case tests.
+
+## Compilation and Whitespace
+
+```powershell
+uv run python -m compileall `
+    src tests `
+    -q
+
+git diff --check
+```
+
+Both commands should be quiet when successful.
 
 ## Pre-commit Hooks
 
-Install the repository’s Git pre-commit hook:
+Install the hook once:
 
 ```powershell
 uv run pre-commit install
 ```
 
-Run every configured hook manually:
+Run every hook:
 
 ```powershell
 uv run pre-commit run --all-files
 ```
 
-The configured hooks check:
-
-* Large added files
-* Filename case conflicts
-* Unresolved merge markers
-* TOML syntax
-* YAML syntax
-* Final newlines
-* Trailing whitespace
-* Ruff linting
-* Ruff formatting
-
-A hook may modify a file and stop the first run. Review the modification and run the hooks again until all checks pass.
+Hooks check large files, filename conflicts, merge markers, TOML and YAML,
+final newlines, trailing whitespace, Ruff linting, and Ruff formatting.
 
 ## Complete Local Quality Gate
 
-Before creating a commit or pull request, run:
+Before committing:
 
 ```powershell
 uv lock --check
@@ -272,83 +194,93 @@ uv run ruff format --check .
 uv run ruff check .
 uv run mypy src tests
 uv run pytest --cov=fleetmind_rag --cov-report=term-missing
+uv run python -m compileall src tests -q
+git diff --check
 uv run pre-commit run --all-files
 ```
 
-All commands should pass.
+## Git Workflow
 
-## Git Branch Workflow
-
-Start new work from an updated `main` branch:
+Start from synchronized `main`:
 
 ```powershell
 git switch main
-git pull --ff-only origin main
+git pull --ff-only
+git status
 ```
 
-Create a focused feature branch:
+Create a focused branch:
 
 ```powershell
 git switch -c TYPE/SHORT-DESCRIPTION
 ```
 
-Examples:
+Common prefixes:
 
-```text
-feat/local-llama-client
-feat/document-retrieval
-fix/citation-validation
-test/retrieval-evaluation
-docs/architecture-guide
-chore/python-quality-tooling
-```
+| Prefix | Purpose |
+| --- | --- |
+| `feat` | New application behavior |
+| `fix` | Defect correction |
+| `test` | Test or evaluation work |
+| `docs` | Documentation |
+| `ci` | Continuous-integration changes |
+| `refactor` | Internal change without intended behavior change |
+| `chore` | Maintenance or tooling |
 
-Inspect changes regularly:
+Inspect and stage only intended paths:
 
 ```powershell
-git status
+git status --short
 git diff
-```
-
-Stage only intended files:
-
-```powershell
 git add FILE_1 FILE_2
+git diff --cached --check
 ```
 
-Create a focused commit:
+Commit, push, and create a pull request:
 
 ```powershell
 git commit -m "type: concise description"
+git push -u origin BRANCH_NAME
+gh pr create --base main --head BRANCH_NAME
 ```
 
-Push the branch and establish upstream tracking:
+Wait for checks before merging:
 
 ```powershell
-git push -u origin BRANCH_NAME
+gh pr checks --watch
+gh pr view
 ```
 
-Create a pull request with GitHub CLI or through the GitHub website.
+After review:
 
-## Commit Message Categories
-
-Use clear commit prefixes:
-
-```text
-feat:     new application functionality
-fix:      bug correction
-docs:     documentation changes
-test:     automated-test changes
-refactor: internal restructuring without intended behavior changes
-chore:    tooling, dependencies, or repository maintenance
-perf:     performance improvement
+```powershell
+gh pr merge --squash --delete-branch
+git switch main
+git pull --ff-only
+git status
 ```
 
-## Generated Files
+## GitHub Actions
 
-Do not commit generated local artifacts such as:
+`.github/workflows/ci.yml` runs on pull requests to `main` and pushes to
+`main`. It performs:
+
+1. Locked dependency installation.
+2. Formatting.
+3. Linting.
+4. Strict type checking.
+5. Tests with coverage.
+6. Strict routing-feedback regression gating.
+
+The gate reads `evaluation/data/routing_feedback_ci.json`, not local runtime
+feedback.
+
+## Generated and Private Files
+
+Do not commit:
 
 ```text
+.env
 .venv/
 .coverage
 htmlcov/
@@ -357,74 +289,42 @@ coverage.xml
 .mypy_cache/
 .ruff_cache/
 __pycache__/
+data/qdrant_local/
 ```
-
-These files can be recreated by the development tools and are excluded through `.gitignore`.
 
 ## Troubleshooting
 
-### The project environment is missing
-
-Run:
+### Environment is missing or inconsistent
 
 ```powershell
-uv sync
+uv sync --locked
 ```
 
-### The virtual environment is not active in VS Code
+### VS Code does not activate the environment
 
-Open a new integrated terminal or select the interpreter located at:
+Select:
 
 ```text
 .venv\Scripts\python.exe
 ```
 
-### Ruff reports formatting differences
+Then open a new integrated terminal.
 
-Run:
+### Formatting check fails
 
 ```powershell
 uv run ruff format .
-```
-
-Then check again:
-
-```powershell
 uv run ruff format --check .
 ```
 
-### pytest reports that no tests were collected
-
-Confirm that:
-
-* The `tests` directory exists
-* Test filenames begin with `test_`
-* Test function names begin with `test_`
-
-### A pre-commit hook modifies a file
-
-Review the modification:
+### A hook changes files
 
 ```powershell
 git diff
-```
-
-Stage the corrected file and rerun:
-
-```powershell
 uv run pre-commit run --all-files
 ```
 
-### Git reports that the current directory is not a repository
+Restage the corrected files before committing.
 
-Return to the FleetMind-RAG root:
-
-```powershell
-Set-Location C:\path\to\fleetmind-rag
-```
-
-Then verify:
-
-```powershell
-git status
-```
+For runtime and feedback problems, see
+[`operations.md`](operations.md).

@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+  "revision": 1,
+  "observations": [
+    {
+      "query": "What does overheating mean? baseline 01",
+      "strategy": "dense",
+      "verdict": "accept",
+      "quality_score": 0.9,
+      "attempt_number": 1,
+      "features": ["conceptual"]
+    },
+    {
+      "query": "What does overheating mean? baseline 02",
+      "strategy": "dense",
+      "verdict": "accept",
+      "quality_score": 0.9,
+      "attempt_number": 1,
+      "features": ["conceptual"]
+    },
+    {
+      "query": "What does overheating mean? baseline 03",
+      "strategy": "dense",
+      "verdict": "accept",
+      "quality_score": 0.9,
+      "attempt_number": 1,
+      "features": ["conceptual"]
+    },
+    {
+      "query": "What does overheating mean? baseline 04",
+      "strategy": "dense",
+      "verdict": "accept",
+      "quality_score": 0.9,
+      "attempt_number": 1,
+      "features": ["conceptual"]
+    },
+    {
+      "query": "What does overheating mean? baseline 05",
+      "strategy": "dense",
+      "verdict": "accept",
+      "quality_score": 0.9,
+      "attempt_number": 1,
+      "features": ["conceptual"]
+    },
+    {
+      "query": "What does overheating mean? baseline 06",
+      "strategy": "dense",
+      "verdict": "accept",
+      "quality_score": 0.9,
+      "attempt_number": 1,
+      "features": ["conceptual"]
+    },
+    {
+      "query": "What does overheating mean? baseline 07",
+      "strategy": "dense",
+      "verdict": "accept",
+      "quality_score": 0.9,
+      "attempt_number": 1,
+      "features": ["conceptual"]
+    },
+    {
+      "query": "What does overheating mean? baseline 08",
+      "strategy": "dense",
+      "verdict": "accept",
+      "quality_score": 0.9,
+      "attempt_number": 1,
+      "features": ["conceptual"]
+    },
+    {
+      "query": "What does overheating mean? baseline 09",
+      "strategy": "dense",
+      "verdict": "accept",
+      "quality_score": 0.9,
+      "attempt_number": 1,
+      "features": ["conceptual"]
+    },
+    {
+      "query": "What does overheating mean? baseline 10",
+      "strategy": "dense",
+      "verdict": "accept",
+      "quality_score": 0.9,
+      "attempt_number": 1,
+      "features": ["conceptual"]
+    },
+    {
+      "query": "What does overheating mean? recent 01",
+      "strategy": "dense",
+      "verdict": "accept",
+      "quality_score": 0.9,
+      "attempt_number": 1,
+      "features": ["conceptual"]
+    },
+    {
+      "query": "What does overheating mean? recent 02",
+      "strategy": "dense",
+      "verdict": "accept",
+      "quality_score": 0.9,
+      "attempt_number": 1,
+      "features": ["conceptual"]
+    },
+    {
+      "query": "What does overheating mean? recent 03",
+      "strategy": "dense",
+      "verdict": "accept",
+      "quality_score": 0.9,
+      "attempt_number": 1,
+      "features": ["conceptual"]
+    },
+    {
+      "query": "What does overheating mean? recent 04",
+      "strategy": "dense",
+      "verdict": "accept",
+      "quality_score": 0.9,
+      "attempt_number": 1,
+      "features": ["conceptual"]
+    },
+    {
+      "query": "What does overheating mean? recent 05",
+      "strategy": "dense",
+      "verdict": "accept",
+      "quality_score": 0.9,
+      "attempt_number": 1,
+      "features": ["conceptual"]
+    },
+    {
+      "query": "What does overheating mean? recent 06",
+      "strategy": "dense",
+      "verdict": "accept",
+      "quality_score": 0.9,
+      "attempt_number": 1,
+      "features": ["conceptual"]
+    },
+    {
+      "query": "What does overheating mean? recent 07",
+      "strategy": "dense",
+      "verdict": "accept",
+      "quality_score": 0.9,
+      "attempt_number": 1,
+      "features": ["conceptual"]
+    },
+    {
+      "query": "What does overheating mean? recent 08",
+      "strategy": "dense",
+      "verdict": "accept",
+      "quality_score": 0.9,
+      "attempt_number": 1,
+      "features": ["conceptual"]
+    },
+    {
+      "query": "What does overheating mean? recent 09",
+      "strategy": "dense",
+      "verdict": "accept",
+      "quality_score": 0.9,
+      "attempt_number": 1,
+      "features": ["conceptual"]
+    },
+    {
+      "query": "What does overheating mean? recent 10",
+      "strategy": "dense",
+      "verdict": "accept",
+      "quality_score": 0.9,
+      "attempt_number": 1,
+      "features": ["conceptual"]
+    }
+  ]
+}

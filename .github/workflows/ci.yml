@@ -44,3 +44,13 @@ jobs:
 
       - name: Run tests with coverage
         run: uv run pytest --cov=fleetmind_rag --cov-report=term-missing
+
+      - name: Enforce routing feedback regression gate
+        run: >-
+          uv run fleetmind-rag feedback-gate
+          --feedback-path evaluation/data/routing_feedback_ci.json
+          --window-size 10
+          --minimum-change 0.05
+          --minimum-strategy-observations 2
+          --format json
+          --fail-on warn

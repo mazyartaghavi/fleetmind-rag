@@ -557,6 +557,15 @@ def build_cli_parser() -> argparse.ArgumentParser:
         help="Required strategy observations in each comparison window.",
     )
     gate_parser.add_argument(
+        "--feedback-path",
+        type=Path,
+        default=None,
+        help=(
+            "Explicit routing-feedback JSON snapshot; defaults to the "
+            "configured runtime store."
+        ),
+    )
+    gate_parser.add_argument(
         "--format",
         choices=("text", "json"),
         default="text",
@@ -802,6 +811,7 @@ def run_feedback_gate(
     window_size: int = 10,
     minimum_utility_change: float = 0.05,
     minimum_strategy_observations: int = 2,
+    feedback_path: Path | None = None,
     output_format: str = "text",
     enforcement: GateEnforcement = "fail",
 ) -> int:
@@ -815,7 +825,11 @@ def run_feedback_gate(
         )
         return 1
 
-    path = settings.qdrant_path / "routing_feedback.json"
+    path = (
+        feedback_path.expanduser()
+        if feedback_path is not None
+        else settings.qdrant_path / "routing_feedback.json"
+    )
 
     try:
         snapshot = JsonRoutingFeedbackStore(path).load()
@@ -916,6 +930,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 int,
                 args.minimum_strategy_observations,
             ),
+            feedback_path=cast(Path | None, args.feedback_path),
             output_format=cast(str, args.format),
             enforcement=cast(GateEnforcement, args.fail_on),
         )

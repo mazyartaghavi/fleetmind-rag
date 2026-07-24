@@ -8,6 +8,11 @@ import pytest
 from pydantic_settings import SettingsConfigDict
 
 from fleetmind_rag.config import FleetMindSettings
+from fleetmind_rag.feedback_routing import (
+    RoutingFeedbackHistory,
+    RoutingFeedbackObservation,
+)
+from fleetmind_rag.feedback_store import FeedbackStoreSnapshot
 from fleetmind_rag.runtime import FleetMindRAGRuntime
 
 
@@ -46,6 +51,29 @@ class _FakeAdaptiveGroundedAnswerService:
     max_context_chars: int
 
 
+@dataclass
+class _FakeFeedbackStore:
+    path: Path
+    snapshot: FeedbackStoreSnapshot
+    save_calls: list[tuple[RoutingFeedbackHistory, int | None]]
+
+    def load(self) -> FeedbackStoreSnapshot:
+        return self.snapshot
+
+    def save(
+        self,
+        history: RoutingFeedbackHistory,
+        *,
+        expected_revision: int | None = None,
+    ) -> FeedbackStoreSnapshot:
+        self.save_calls.append((history, expected_revision))
+        self.snapshot = FeedbackStoreSnapshot(
+            history=history,
+            revision=self.snapshot.revision + 1,
+        )
+        return self.snapshot
+
+
 class _FakeEmbeddingClient:
     def __init__(
         self,
@@ -69,6 +97,7 @@ def _build_fake_runtime(
     retrieval: _FakeRetrievalService,
     grounded: _FakeGroundedAnswerService,
     adaptive: _FakeAdaptiveGroundedAnswerService,
+    feedback_store: _FakeFeedbackStore,
 ) -> FleetMindRAGRuntime:
     return FleetMindRAGRuntime(
         settings,
@@ -76,6 +105,8 @@ def _build_fake_runtime(
         cast(Any, retrieval),
         cast(Any, grounded),
         cast(Any, adaptive),
+        cast(Any, feedback_store),
+        feedback_store.snapshot,
     )
 
 
@@ -91,6 +122,15 @@ def test_runtime_builds_configured_service_graph(
         ollama_timeout_seconds=45.0,
     )
     created_store = _FakeVectorStore(settings.qdrant_path, settings.qdrant_collection)
+    feedback_snapshot = FeedbackStoreSnapshot(
+        history=RoutingFeedbackHistory(),
+        revision=4,
+    )
+    created_feedback_store = _FakeFeedbackStore(
+        settings.qdrant_path / "routing_feedback.json",
+        feedback_snapshot,
+        [],
+    )
 
     monkeypatch.setattr(
         "fleetmind_rag.runtime.QdrantChunkStore.from_local_path",
@@ -107,6 +147,14 @@ def test_runtime_builds_configured_service_graph(
     monkeypatch.setattr(
         "fleetmind_rag.runtime.DocumentRetrievalService",
         _FakeRetrievalService,
+    )
+    monkeypatch.setattr(
+        "fleetmind_rag.runtime.JsonRoutingFeedbackStore",
+        lambda path: (
+            created_feedback_store
+            if path == settings.qdrant_path / "routing_feedback.json"
+            else pytest.fail(f"Unexpected feedback path: {path}")
+        ),
     )
 
     def _build_grounded_service(
@@ -132,8 +180,10 @@ def test_runtime_builds_configured_service_graph(
         retrieval_service: _FakeRetrievalService,
         chat_client: _FakeChatClient,
         *,
+        history: RoutingFeedbackHistory,
         max_context_chars: int,
     ) -> _FakeAdaptiveGroundedAnswerService:
+        assert history is feedback_snapshot.history
         return _FakeAdaptiveGroundedAnswerService(
             retrieval_service,
             chat_client,
@@ -172,6 +222,8 @@ def test_runtime_builds_configured_service_graph(
     assert adaptive_service.retrieval_service is retrieval_service
     assert adaptive_service.chat_client is grounded_service.chat_client
     assert adaptive_service.max_context_chars == 4096
+    assert id(runtime.feedback_store) == id(created_feedback_store)
+    assert runtime.feedback_snapshot == feedback_snapshot
 
 
 def test_runtime_context_manager_closes_store() -> None:
@@ -180,7 +232,19 @@ def test_runtime_context_manager_closes_store() -> None:
     retrieval = _FakeRetrievalService(object(), store)
     grounded = _FakeGroundedAnswerService(retrieval, object(), 0.5, 6000)
     adaptive = _FakeAdaptiveGroundedAnswerService(retrieval, object(), 6000)
-    runtime = _build_fake_runtime(settings, store, retrieval, grounded, adaptive)
+    feedback_store = _FakeFeedbackStore(
+        Path("data/qdrant_local/routing_feedback.json"),
+        FeedbackStoreSnapshot(RoutingFeedbackHistory(), 0),
+        [],
+    )
+    runtime = _build_fake_runtime(
+        settings,
+        store,
+        retrieval,
+        grounded,
+        adaptive,
+        feedback_store,
+    )
 
     with runtime:
         assert runtime.settings is settings
@@ -195,7 +259,19 @@ def test_runtime_close_is_idempotent() -> None:
     retrieval = _FakeRetrievalService(object(), store)
     grounded = _FakeGroundedAnswerService(retrieval, object(), 0.5, 6000)
     adaptive = _FakeAdaptiveGroundedAnswerService(retrieval, object(), 6000)
-    runtime = _build_fake_runtime(settings, store, retrieval, grounded, adaptive)
+    feedback_store = _FakeFeedbackStore(
+        Path("data/qdrant_local/routing_feedback.json"),
+        FeedbackStoreSnapshot(RoutingFeedbackHistory(), 0),
+        [],
+    )
+    runtime = _build_fake_runtime(
+        settings,
+        store,
+        retrieval,
+        grounded,
+        adaptive,
+        feedback_store,
+    )
 
     runtime.close()
     runtime.close()
@@ -210,8 +286,83 @@ def test_closed_runtime_cannot_be_reentered() -> None:
     retrieval = _FakeRetrievalService(object(), store)
     grounded = _FakeGroundedAnswerService(retrieval, object(), 0.5, 6000)
     adaptive = _FakeAdaptiveGroundedAnswerService(retrieval, object(), 6000)
-    runtime = _build_fake_runtime(settings, store, retrieval, grounded, adaptive)
+    feedback_store = _FakeFeedbackStore(
+        Path("data/qdrant_local/routing_feedback.json"),
+        FeedbackStoreSnapshot(RoutingFeedbackHistory(), 0),
+        [],
+    )
+    runtime = _build_fake_runtime(
+        settings,
+        store,
+        retrieval,
+        grounded,
+        adaptive,
+        feedback_store,
+    )
     runtime.close()
 
     with pytest.raises(RuntimeError, match="closed"):
         runtime.__enter__()
+
+
+def test_runtime_persists_feedback_with_loaded_revision() -> None:
+    settings = _TestFleetMindSettings()
+    store = _FakeVectorStore(Path("data/qdrant_local"), "fleetmind_documents")
+    retrieval = _FakeRetrievalService(object(), store)
+    grounded = _FakeGroundedAnswerService(retrieval, object(), 0.5, 6000)
+    adaptive = _FakeAdaptiveGroundedAnswerService(retrieval, object(), 6000)
+    original_history = RoutingFeedbackHistory()
+    feedback_store = _FakeFeedbackStore(
+        Path("data/qdrant_local/routing_feedback.json"),
+        FeedbackStoreSnapshot(original_history, 7),
+        [],
+    )
+    runtime = _build_fake_runtime(
+        settings,
+        store,
+        retrieval,
+        grounded,
+        adaptive,
+        feedback_store,
+    )
+    updated_history = original_history.record(
+        RoutingFeedbackObservation(
+            query="What does overheating mean?",
+            strategy="dense",
+            verdict="accept",
+            quality_score=0.9,
+            attempt_number=1,
+            features=("conceptual",),
+        )
+    )
+
+    snapshot = runtime.persist_feedback(updated_history)
+
+    assert feedback_store.save_calls == [(updated_history, 7)]
+    assert snapshot.revision == 8
+    assert runtime.feedback_snapshot == snapshot
+
+
+def test_closed_runtime_cannot_persist_feedback() -> None:
+    settings = _TestFleetMindSettings()
+    store = _FakeVectorStore(Path("data/qdrant_local"), "fleetmind_documents")
+    retrieval = _FakeRetrievalService(object(), store)
+    grounded = _FakeGroundedAnswerService(retrieval, object(), 0.5, 6000)
+    adaptive = _FakeAdaptiveGroundedAnswerService(retrieval, object(), 6000)
+    feedback_store = _FakeFeedbackStore(
+        Path("data/qdrant_local/routing_feedback.json"),
+        FeedbackStoreSnapshot(RoutingFeedbackHistory(), 0),
+        [],
+    )
+    runtime = _build_fake_runtime(
+        settings,
+        store,
+        retrieval,
+        grounded,
+        adaptive,
+        feedback_store,
+    )
+    runtime.close()
+
+    with pytest.raises(RuntimeError, match="closed"):
+        runtime.persist_feedback(RoutingFeedbackHistory())

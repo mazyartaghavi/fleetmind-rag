@@ -14,6 +14,11 @@ from fleetmind_rag.feedback_analytics import (
     RoutingFeedbackReport,
 )
 from fleetmind_rag.feedback_store import JsonRoutingFeedbackStore
+from fleetmind_rag.feedback_trends import (
+    FeedbackTrendPolicy,
+    RoutingFeedbackTrendAnalyzer,
+    RoutingFeedbackTrendReport,
+)
 from fleetmind_rag.grounded_rag import GroundedAnswerResult
 from fleetmind_rag.ollama import (
     OllamaChatClient,
@@ -240,6 +245,91 @@ def _format_decimal(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.4f}"
 
 
+def build_feedback_trend_message(
+    report: RoutingFeedbackTrendReport,
+    *,
+    path: Path,
+    schema_version: int,
+) -> str:
+    """Build a deterministic previous-versus-recent feedback trend report."""
+
+    lines = [
+        "FleetMind routing feedback trend report",
+        f"Path: {path}",
+        f"Schema version: {schema_version}",
+        f"Revision: {report.revision}",
+        f"Total observations: {report.total_observations}",
+        f"Window size: {report.policy.window_size}",
+        (f"Minimum utility change: {report.policy.minimum_utility_change:.4f}"),
+        (
+            "Previous window: "
+            f"{
+                _format_position_range(
+                    report.previous_start_position,
+                    report.previous_end_position,
+                )
+            }"
+        ),
+        (
+            "Recent window: "
+            f"{
+                _format_position_range(
+                    report.recent_start_position,
+                    report.recent_end_position,
+                )
+            }"
+        ),
+        "",
+        f"Overall trend: {report.overall.direction}",
+        (f"Previous utility: {_format_decimal(report.overall.previous.utility_score)}"),
+        (f"Recent utility: {_format_decimal(report.overall.recent.utility_score)}"),
+        f"Utility delta: {_format_signed_decimal(report.overall.utility_delta)}",
+        (
+            "Acceptance delta: "
+            f"{_format_signed_percentage(report.overall.acceptance_delta)}"
+        ),
+        (f"Quality delta: {_format_signed_decimal(report.overall.quality_delta)}"),
+        (
+            "Rewrite-rate delta: "
+            f"{_format_signed_percentage(report.overall.rewrite_delta)}"
+        ),
+        (f"Retry-rate delta: {_format_signed_percentage(report.overall.retry_delta)}"),
+        f"Reason: {report.overall.reason}",
+        "",
+        "Strategy trends:",
+        "strategy   previous  recent  direction          utility-delta",
+    ]
+    lines.extend(
+        (
+            f"{comparison.strategy:10}"
+            f"{comparison.previous.observation_count:9}"
+            f"{comparison.recent.observation_count:8}  "
+            f"{comparison.direction:18}"
+            f"{_format_signed_decimal(comparison.utility_delta):>13}"
+        )
+        for comparison in report.strategies
+    )
+    return "\n".join(lines)
+
+
+def _format_position_range(
+    start: int | None,
+    end: int | None,
+) -> str:
+    if start is None or end is None:
+        return "none"
+
+    return f"{start}-{end}"
+
+
+def _format_signed_decimal(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:+.4f}"
+
+
+def _format_signed_percentage(value: float | None) -> str:
+    return "n/a" if value is None else f"{value:+.2%}"
+
+
 def build_cli_parser() -> argparse.ArgumentParser:
     """Build the FleetMind-RAG command-line argument parser."""
 
@@ -337,6 +427,28 @@ def build_cli_parser() -> argparse.ArgumentParser:
     subparsers.add_parser(
         "feedback-report",
         help="Summarize persisted adaptive-routing feedback.",
+    )
+    trend_parser = subparsers.add_parser(
+        "feedback-trend",
+        help="Compare the latest two routing-feedback windows.",
+    )
+    trend_parser.add_argument(
+        "--window-size",
+        type=int,
+        default=10,
+        help="Observations per chronological comparison window.",
+    )
+    trend_parser.add_argument(
+        "--minimum-change",
+        type=float,
+        default=0.05,
+        help="Minimum absolute utility change for improvement or regression.",
+    )
+    trend_parser.add_argument(
+        "--minimum-strategy-observations",
+        type=int,
+        default=2,
+        help="Required strategy observations in each comparison window.",
     )
 
     return parser
@@ -529,6 +641,43 @@ def run_feedback_report(settings: FleetMindSettings) -> int:
     return 0
 
 
+def run_feedback_trend(
+    settings: FleetMindSettings,
+    *,
+    window_size: int = 10,
+    minimum_utility_change: float = 0.05,
+    minimum_strategy_observations: int = 2,
+) -> int:
+    """Load persisted feedback and compare adjacent chronological windows."""
+
+    path = settings.qdrant_path / "routing_feedback.json"
+
+    try:
+        snapshot = JsonRoutingFeedbackStore(path).load()
+        report = RoutingFeedbackTrendAnalyzer(
+            FeedbackTrendPolicy(
+                window_size=window_size,
+                minimum_utility_change=minimum_utility_change,
+                minimum_strategy_observations=minimum_strategy_observations,
+            )
+        ).analyze(
+            snapshot.history,
+            revision=snapshot.revision,
+        )
+    except (OSError, ValueError, RuntimeError) as error:
+        print(f"FleetMind feedback trend failed: {error}", file=sys.stderr)
+        return 1
+
+    print(
+        build_feedback_trend_message(
+            report,
+            path=path,
+            schema_version=snapshot.schema_version,
+        )
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the FleetMind-RAG command-line application."""
 
@@ -565,5 +714,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if command == "feedback-report":
         return run_feedback_report(settings)
+
+    if command == "feedback-trend":
+        return run_feedback_trend(
+            settings,
+            window_size=cast(int, args.window_size),
+            minimum_utility_change=cast(float, args.minimum_change),
+            minimum_strategy_observations=cast(
+                int,
+                args.minimum_strategy_observations,
+            ),
+        )
 
     return run_status(settings)

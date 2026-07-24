@@ -12,10 +12,12 @@ from fleetmind_rag.app import (
     DEFAULT_SYSTEM_PROMPT,
     build_adaptive_grounded_answer_message,
     build_feedback_report_message,
+    build_feedback_trend_message,
     build_system_prompt,
     main,
     run_ask,
     run_feedback_report,
+    run_feedback_trend,
     run_index,
 )
 from fleetmind_rag.config import FleetMindSettings
@@ -25,6 +27,10 @@ from fleetmind_rag.feedback_routing import (
     RoutingFeedbackObservation,
 )
 from fleetmind_rag.feedback_store import FeedbackStoreSnapshot
+from fleetmind_rag.feedback_trends import (
+    FeedbackTrendPolicy,
+    RoutingFeedbackTrendAnalyzer,
+)
 from fleetmind_rag.grounded_rag import (
     GroundedAnswerResult,
     GroundedCitation,
@@ -702,7 +708,7 @@ def test_cli_parser_lists_rag_commands(capsys: pytest.CaptureFixture[str]) -> No
     captured = capsys.readouterr()
 
     assert error.value.code == 0
-    assert "{chat,index,ask,feedback-report}" in captured.out
+    assert "{chat,index,ask,feedback-report,feedback-trend}" in captured.out
     assert "citation-grounded" in captured.out
     assert "persisted adaptive-routing feedback" in captured.out
     assert captured.err == ""
@@ -884,3 +890,197 @@ def test_feedback_report_returns_failure_for_invalid_store(
     assert captured.err == (
         "FleetMind feedback report failed: feedback JSON is malformed\n"
     )
+
+
+def _trend_history() -> RoutingFeedbackHistory:
+    return RoutingFeedbackHistory(
+        (
+            RoutingFeedbackObservation(
+                query="What does overheating mean?",
+                strategy="dense",
+                verdict="rewrite",
+                quality_score=0.0,
+                attempt_number=1,
+                features=("conceptual",),
+            ),
+            RoutingFeedbackObservation(
+                query="What does overheating mean?",
+                strategy="dense",
+                verdict="rewrite",
+                quality_score=0.0,
+                attempt_number=2,
+                features=("conceptual",),
+            ),
+            RoutingFeedbackObservation(
+                query="What does overheating mean?",
+                strategy="dense",
+                verdict="accept",
+                quality_score=1.0,
+                attempt_number=1,
+                features=("conceptual",),
+            ),
+            RoutingFeedbackObservation(
+                query="What does overheating mean?",
+                strategy="dense",
+                verdict="accept",
+                quality_score=1.0,
+                attempt_number=1,
+                features=("conceptual",),
+            ),
+        )
+    )
+
+
+def test_build_feedback_trend_message_formats_improving_report() -> None:
+    report = RoutingFeedbackTrendAnalyzer(
+        FeedbackTrendPolicy(
+            window_size=2,
+            minimum_strategy_observations=1,
+        )
+    ).analyze(_trend_history(), revision=9)
+
+    message = build_feedback_trend_message(
+        report,
+        path=Path("data/qdrant_local/routing_feedback.json"),
+        schema_version=1,
+    )
+
+    assert "FleetMind routing feedback trend report" in message
+    assert "Revision: 9" in message
+    assert "Total observations: 4" in message
+    assert "Previous window: 1-2" in message
+    assert "Recent window: 3-4" in message
+    assert "Overall trend: improving" in message
+    assert "Previous utility: 0.0000" in message
+    assert "Recent utility: 1.0000" in message
+    assert "Utility delta: +1.0000" in message
+    assert "Acceptance delta: +100.00%" in message
+    assert "dense" in message
+
+
+def test_run_feedback_trend_loads_store_and_prints_comparison(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    settings = _TestFleetMindSettings(qdrant_path=tmp_path / "qdrant")
+    expected_path = tmp_path / "qdrant" / "routing_feedback.json"
+    snapshot = FeedbackStoreSnapshot(
+        history=_trend_history(),
+        revision=12,
+    )
+    created_paths: list[Path] = []
+
+    class _FakeStore:
+        def __init__(self, path: Path) -> None:
+            created_paths.append(path)
+
+        def load(self) -> FeedbackStoreSnapshot:
+            return snapshot
+
+    monkeypatch.setattr(
+        "fleetmind_rag.app.JsonRoutingFeedbackStore",
+        _FakeStore,
+    )
+
+    exit_code = run_feedback_trend(
+        settings,
+        window_size=2,
+        minimum_strategy_observations=1,
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert created_paths == [expected_path]
+    assert "Revision: 12" in captured.out
+    assert "Overall trend: improving" in captured.out
+    assert captured.err == ""
+
+
+def test_feedback_trend_command_forwards_cli_controls(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    snapshot = FeedbackStoreSnapshot(
+        history=_trend_history(),
+        revision=6,
+    )
+
+    class _FakeStore:
+        def __init__(self, path: Path) -> None:
+            assert path == Path("data/qdrant_local/routing_feedback.json")
+
+        def load(self) -> FeedbackStoreSnapshot:
+            return snapshot
+
+    monkeypatch.setattr(
+        "fleetmind_rag.app.JsonRoutingFeedbackStore",
+        _FakeStore,
+    )
+
+    exit_code = main(
+        [
+            "feedback-trend",
+            "--window-size",
+            "2",
+            "--minimum-change",
+            "0.10",
+            "--minimum-strategy-observations",
+            "1",
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "Window size: 2" in captured.out
+    assert "Minimum utility change: 0.1000" in captured.out
+    assert "Overall trend: improving" in captured.out
+    assert captured.err == ""
+
+
+def test_feedback_trend_reports_invalid_controls(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    settings = _TestFleetMindSettings()
+
+    class _FakeStore:
+        def __init__(self, path: Path) -> None:
+            del path
+
+        def load(self) -> FeedbackStoreSnapshot:
+            return FeedbackStoreSnapshot(
+                history=RoutingFeedbackHistory(),
+                revision=0,
+            )
+
+    monkeypatch.setattr(
+        "fleetmind_rag.app.JsonRoutingFeedbackStore",
+        _FakeStore,
+    )
+
+    exit_code = run_feedback_trend(settings, window_size=0)
+    captured = capsys.readouterr()
+
+    assert exit_code == 1
+    assert captured.out == ""
+    assert captured.err == (
+        "FleetMind feedback trend failed: window_size must be greater than zero\n"
+    )
+
+
+def test_feedback_trend_help_lists_comparison_controls(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as error:
+        main(["feedback-trend", "--help"])
+
+    captured = capsys.readouterr()
+
+    assert error.value.code == 0
+    assert "--window-size" in captured.out
+    assert "--minimum-change" in captured.out
+    assert "--minimum-strategy-observations" in captured.out
+    assert captured.err == ""
